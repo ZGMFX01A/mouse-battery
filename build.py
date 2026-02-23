@@ -22,10 +22,8 @@ def build():
 
     # 获取 flet 和 flet_desktop 的路径
     import flet
-    import flet_desktop
     flet_dir = os.path.dirname(flet.__file__)
-    flet_desktop_dir = os.path.dirname(flet_desktop.__file__)
-
+    
     cmd = [
         sys.executable, '-m', 'PyInstaller',
         '--onefile',
@@ -34,15 +32,24 @@ def build():
         '--clean',
         # Flet 依赖资源
         '--add-data', f'{flet_dir};flet',
-        '--add-data', f'{flet_desktop_dir};flet_desktop',
-        # 隐式导入
+    ]
+
+    try:
+        import flet_desktop
+        flet_desktop_dir = os.path.dirname(flet_desktop.__file__)
+        cmd.extend(['--add-data', f'{flet_desktop_dir};flet_desktop'])
+    except ImportError:
+        print("警告: 未找到 flet_desktop，正在跳过该包 (可能导致打包后无法运行 GUI界面)")
+
+    # 隐式导入和其他启动文件
+    cmd.extend([
         '--hidden-import', 'pystray._win32',
         '--hidden-import', 'PIL',
         '--hidden-import', 'hid',
         '--hidden-import', 'flet',
         '--hidden-import', 'gui',
         'main.py',
-    ]
+    ])
 
     # 如果有图标文件
     ico_path = os.path.join(os.path.dirname(__file__), 'app.ico')
