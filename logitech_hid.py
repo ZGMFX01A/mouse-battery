@@ -1,0 +1,390 @@
+"""
+罗技 HID++ 2.0 协议实现
+
+通过 Lightspeed 接收器与罗技无线鼠标通信，查询电池状态。
+参考：Solaar 项目 (https://github.com/pwr-Solaar/Solaar)
+"""
+
+import struct
+import time
+import logging
+from dataclasses import dataclass
+from typing import Optional
+
+import hid
+
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# 常量定义
+# ============================================================
+
+LOGITECH_VID = 0x046D
+
+# 已知 Lightspeed 接收器 PID
+LIGHTSPEED_RECEIVER_PIDS = {
+    0xC539,  # Lightspeed Receiver (G Pro Wireless)
+    0xC53A,  # Lightspeed Receiver
+    0xC53D,  # Lightspeed Receiver
+    0xC53F,  # Lightspeed Receiver (G305)
+    0xC541,  # Lightspeed Receiver (G903 / G703)
+    0xC545,  # Lightspeed Receiver
+    0xC547,  # Lightspeed Receiver (G502X Plus)
+    0xC548,  # Bolt Receiver
+    0xC52B,  # Unifying Receiver
+}
+
+# HID++ 报文类型
+HIDPP_SHORT_MSG = 0x10  # 7 字节
+HIDPP_LONG_MSG = 0x11   # 20 字节
+
+# HID++ Feature ID
+FEATURE_ROOT = 0x0000
+FEATURE_FEATURE_SET = 0x0001
+FEATURE_BATTERY_STATUS = 0x1000
+FEATURE_BATTERY_VOLTAGE = 0x1001
+FEATURE_UNIFIED_BATTERY = 0x1004
+
+# 设备号：Lightspeed 一般第一个设备是 0x01
+DEVICE_INDEX_FIRST = 0x01
+
+# 电池电压 -> 百分比映射表 (用于 BATTERY_VOLTAGE feature)
+VOLTAGE_TO_PERCENT = [
+    (4186, 100), (4067, 90), (3989, 80), (3922, 70),
+    (3859, 60), (3811, 50), (3778, 40), (3751, 30),
+    (3717, 20), (3671, 10), (3646, 5), (3579, 2),
+    (3500, 0),
+]
+
+
+@dataclass
+class BatteryInfo:
+    """电池信息"""
+    percentage: int = 0
+    charging: bool = False
+    status_text: str = "未知"
+
+
+class LogitechReceiver:
+    """
+    罗技 Lightspeed / Unifying 接收器通信类
+    """
+
+    def __init__(self, device_info: dict):
+        self.device_info = device_info
+        self.path = device_info['path']
+        self.product_id = device_info['product_id']
+        self.product_string = device_info.get('product_string', '未知接收器')
+        self._device: Optional[hid.device] = None
+        self._feature_cache: dict[int, int] = {}
+
+    def open(self) -> bool:
+        """打开 HID 设备"""
+        try:
+            self._device = hid.device()
+            self._device.open_path(self.path)
+            self._device.set_nonblocking(True)
+            logger.info(f"已打开罗技接收器: {self.product_string} (PID: 0x{self.product_id:04X})")
+            return True
+        except Exception as e:
+            logger.error(f"无法打开罗技接收器: {e}")
+            self._device = None
+            return False
+
+    def close(self):
+        """关闭 HID 设备"""
+        if self._device:
+            try:
+                self._device.close()
+            except Exception:
+                pass
+            self._device = None
+            self._feature_cache.clear()
+
+    def _send_short(self, device_index: int, feature_index: int,
+                    function: int, *params) -> Optional[bytes]:
+        """
+        发送 HID++ 短报文 (7 bytes) 并读取响应
+        """
+        if not self._device:
+            return None
+
+        # 构建报文: [report_id, device_index, feature_index, function<<4 | sw_id, p0, p1, p2]
+        data = [HIDPP_SHORT_MSG, device_index, feature_index,
+                (function << 4) | 0x0A]  # sw_id = 0x0A
+
+        # 填充参数到 3 字节
+        for i in range(3):
+            data.append(params[i] if i < len(params) else 0x00)
+
+        return self._send_and_receive(bytes(data))
+
+    def _send_long(self, device_index: int, feature_index: int,
+                   function: int, *params) -> Optional[bytes]:
+        """
+        发送 HID++ 长报文 (20 bytes) 并读取响应
+        """
+        if not self._device:
+            return None
+
+        # 构建报文
+        data = [HIDPP_LONG_MSG, device_index, feature_index,
+                (function << 4) | 0x0A]
+
+        # 填充参数到 16 字节
+        for i in range(16):
+            data.append(params[i] if i < len(params) else 0x00)
+
+        return self._send_and_receive(bytes(data))
+
+    def _send_and_receive(self, data: bytes, timeout_ms: int = 2000) -> Optional[bytes]:
+        """发送数据并等待响应"""
+        if not self._device:
+            return None
+
+        try:
+            self._device.write(data)
+
+            # 等待响应
+            start = time.monotonic()
+            while (time.monotonic() - start) * 1000 < timeout_ms:
+                response = self._device.read(64)
+                if response:
+                    resp = bytes(response)
+                    # 检查是否是我们期望的响应（匹配 device_index 和 feature_index）
+                    if len(resp) >= 4:
+                        # 错误响应: report_id=0x10, sub_id=0x8F
+                        if resp[2] == 0x8F:
+                            logger.debug(f"HID++ 错误响应: {resp.hex()}")
+                            return None
+                        # 匹配 device_index
+                        if resp[1] == data[1]:
+                            return resp
+                time.sleep(0.01)
+
+            logger.debug("HID++ 响应超时")
+            return None
+        except Exception as e:
+            logger.error(f"HID++ 通信错误: {e}")
+            return None
+
+    def get_feature_index(self, device_index: int, feature_id: int) -> Optional[int]:
+        """
+        通过 ROOT feature (0x0000) 查询指定 Feature 的 index
+        """
+        cache_key = (device_index << 16) | feature_id
+        if cache_key in self._feature_cache:
+            return self._feature_cache[cache_key]
+
+        # Feature 0x0000, Function 0x00: getFeatureID
+        # 参数: feature_id 高字节, feature_id 低字节
+        response = self._send_short(
+            device_index, 0x00, 0x00,
+            (feature_id >> 8) & 0xFF,
+            feature_id & 0xFF
+        )
+
+        if response and len(response) >= 5:
+            feature_index = response[4]
+            if feature_index != 0:
+                self._feature_cache[cache_key] = feature_index
+                logger.debug(f"Feature 0x{feature_id:04X} -> index {feature_index}")
+                return feature_index
+
+        return None
+
+    def get_battery_unified(self, device_index: int) -> Optional[BatteryInfo]:
+        """
+        通过 UNIFIED_BATTERY (0x1004) 获取电池状态
+        Function 0: get_capabilities
+        Function 1: get_status
+        """
+        idx = self.get_feature_index(device_index, FEATURE_UNIFIED_BATTERY)
+        if idx is None:
+            return None
+
+        # Function 0x01: get_status
+        response = self._send_short(device_index, idx, 0x00)
+        if response and len(response) >= 7:
+            percentage = response[4]
+            level = response[5]  # 1=critical, 2=low, 4=good, 8=full
+            charging = response[6]
+
+            info = BatteryInfo()
+            info.percentage = percentage
+            info.charging = charging != 0
+
+            if info.charging:
+                info.status_text = "充电中"
+            elif level & 0x08:
+                info.status_text = "已充满"
+            elif level & 0x04:
+                info.status_text = "电量良好"
+            elif level & 0x02:
+                info.status_text = "电量低"
+            elif level & 0x01:
+                info.status_text = "电量极低"
+            else:
+                info.status_text = "放电中"
+
+            logger.info(f"UNIFIED_BATTERY: {percentage}%, 充电={info.charging}")
+            return info
+
+        return None
+
+    def get_battery_status(self, device_index: int) -> Optional[BatteryInfo]:
+        """
+        通过 BATTERY_STATUS (0x1000) 获取电池状态
+        Function 0: get_battery_level_status
+        """
+        idx = self.get_feature_index(device_index, FEATURE_BATTERY_STATUS)
+        if idx is None:
+            return None
+
+        response = self._send_short(device_index, idx, 0x00)
+        if response and len(response) >= 7:
+            percentage = response[4]
+            next_percentage = response[5]
+            status = response[6]
+
+            info = BatteryInfo()
+            info.percentage = percentage
+
+            # status: 0=discharging, 1=recharging, 2=almost_full,
+            #         3=charged, 4=slow_recharge, 5=invalid_battery,
+            #         6=thermal_error
+            if status in (1, 2, 4):
+                info.charging = True
+                info.status_text = "充电中"
+            elif status == 3:
+                info.charging = True
+                info.status_text = "已充满"
+            elif status == 0:
+                info.status_text = "放电中"
+            else:
+                info.status_text = "未知"
+
+            logger.info(f"BATTERY_STATUS: {percentage}%, status={status}")
+            return info
+
+        return None
+
+    def get_battery_voltage(self, device_index: int) -> Optional[BatteryInfo]:
+        """
+        通过 BATTERY_VOLTAGE (0x1001) 获取电池电压
+        """
+        idx = self.get_feature_index(device_index, FEATURE_BATTERY_VOLTAGE)
+        if idx is None:
+            return None
+
+        response = self._send_short(device_index, idx, 0x00)
+        if response and len(response) >= 7:
+            voltage = (response[4] << 8) | response[5]
+            flags = response[6]
+
+            info = BatteryInfo()
+            info.charging = (flags & 0x80) != 0
+
+            # 电压 -> 百分比转换
+            info.percentage = self._voltage_to_percent(voltage)
+            info.status_text = "充电中" if info.charging else "放电中"
+
+            logger.info(f"BATTERY_VOLTAGE: {voltage}mV -> {info.percentage}%, 充电={info.charging}")
+            return info
+
+        return None
+
+    @staticmethod
+    def _voltage_to_percent(voltage: int) -> int:
+        """将电压值转换为百分比"""
+        if voltage >= VOLTAGE_TO_PERCENT[0][0]:
+            return 100
+        if voltage <= VOLTAGE_TO_PERCENT[-1][0]:
+            return 0
+
+        for i in range(len(VOLTAGE_TO_PERCENT) - 1):
+            v_high, p_high = VOLTAGE_TO_PERCENT[i]
+            v_low, p_low = VOLTAGE_TO_PERCENT[i + 1]
+            if voltage >= v_low:
+                # 线性插值
+                ratio = (voltage - v_low) / (v_high - v_low)
+                return int(p_low + ratio * (p_high - p_low))
+
+        return 0
+
+    def get_battery(self, device_index: int = DEVICE_INDEX_FIRST) -> Optional[BatteryInfo]:
+        """
+        获取电池状态（依次尝试多种 Feature）
+        """
+        # 优先尝试 UNIFIED_BATTERY（更新的接口）
+        result = self.get_battery_unified(device_index)
+        if result:
+            return result
+
+        # 尝试 BATTERY_STATUS
+        result = self.get_battery_status(device_index)
+        if result:
+            return result
+
+        # 最后尝试 BATTERY_VOLTAGE
+        result = self.get_battery_voltage(device_index)
+        if result:
+            return result
+
+        logger.warning(f"无法从设备 {device_index} 获取电池信息")
+        return None
+
+
+def find_logitech_receivers() -> list[dict]:
+    """
+    扫描所有已连接的罗技 Lightspeed/Unifying 接收器
+    返回适合打开的 HID 设备信息列表
+    """
+    receivers = []
+    seen_paths = set()
+
+    try:
+        all_devices = hid.enumerate(LOGITECH_VID, 0)
+    except Exception as e:
+        logger.error(f"枚举 HID 设备失败: {e}")
+        return []
+
+    for dev in all_devices:
+        pid = dev['product_id']
+        path = dev['path']
+
+        if pid not in LIGHTSPEED_RECEIVER_PIDS:
+            continue
+        if path in seen_paths:
+            continue
+
+        # 选择 usage_page=1 (Generic Desktop) 或 usage_page=0xFF00 (Vendor Defined)
+        # HID++ 通常在 usage_page=0xFF00 上，或者直接使用第一个接口
+        usage_page = dev.get('usage_page', 0)
+        usage = dev.get('usage', 0)
+
+        # 我们需要能收发 HID++ 报文的接口
+        # 优先选择 usage_page=0xFF00 (vendor-defined), usage=1
+        # 或 usage_page=1, usage=2
+        if usage_page in (0xFF00, 0x0001) or usage_page == 0:
+            seen_paths.add(path)
+            receivers.append(dev)
+            logger.debug(
+                f"发现罗技接收器: PID=0x{pid:04X}, "
+                f"usage_page=0x{usage_page:04X}, usage=0x{usage:02X}, "
+                f"interface={dev.get('interface_number', -1)}"
+            )
+
+    # 按 PID + interface_number 去重，优先选择 usage_page=0xFF00 的
+    filtered = {}
+    for dev in receivers:
+        key = dev['product_id']
+        existing = filtered.get(key)
+        if existing is None:
+            filtered[key] = dev
+        else:
+            # 优先使用 vendor-defined usage page
+            if dev.get('usage_page', 0) == 0xFF00:
+                filtered[key] = dev
+
+    return list(filtered.values())
