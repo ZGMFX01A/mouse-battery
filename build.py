@@ -59,9 +59,9 @@ def build():
     print(f"Run: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=os.path.dirname(__file__) or '.')
     if result.returncode == 0:
-        print("\n✅ [SUCCESS] Build complete! Output: dist/MouseBattery.exe")
+        print("\n[SUCCESS] Build complete! Output: dist/MouseBattery.exe")
     else:
-        print(f"\n❌ [ERROR] Build failed, return code: {result.returncode}")
+        print(f"\n[ERROR] Build failed, return code: {result.returncode}")
     return result.returncode
 
 if __name__ == '__main__':
