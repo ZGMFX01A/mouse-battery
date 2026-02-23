@@ -19,7 +19,7 @@ Windows 系统托盘应用，实时监控无线鼠标电池电量。
 ### 雷蛇 (Razer)
 
 | 设备 | PID | 连接方式 | 状态 |
-|------|-----|----------|------|
+| :--- | :--- | :--- | :--- |
 | 巴塞利斯蛇 V3 Pro (无线 Dongle) | 0x00AB / 0x00CD | 2.4G 无线 | ✅ 已验证 |
 | 毒蝰 V2 Pro (无线 Dongle) | 0x007D / 0x00AF | 2.4G 无线 | 🔧 理论支持 |
 | 毒蝰 V3 Pro (无线 Dongle) | 0x00C4 / 0x00C6 | 2.4G 无线 | 🔧 理论支持 |
@@ -28,7 +28,7 @@ Windows 系统托盘应用，实时监控无线鼠标电池电量。
 ### 罗技 (Logitech)
 
 | 设备 | 接收器 PID | 连接方式 | 状态 |
-|------|------------|----------|------|
+| :--- | :--- | :--- | :--- |
 | G903 / G703 | 0xC541 | Lightspeed | 🔧 理论支持 |
 | G502X | 0xC547 | Lightspeed | 🔧 理论支持 |
 | G Pro Wireless | 0xC539 | Lightspeed | 🔧 理论支持 |
@@ -57,7 +57,21 @@ pip install -r requirements.txt
 python main.py
 ```
 
-### 从源码打包 EXE
+### 方式三：GitHub Actions 自动构建 (开发者推荐)
+
+本项目已配置 GitHub Actions 自动构建 CI：
+
+1. 克隆并提交修改到你自己的仓库后。
+2. 每次发布新版本，只需给代码打上 `v` 开头的 Tag：
+
+   ```sh
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+
+3. GitHub Actions 的服务器会自动执行 Windows 环境下的 PyInstaller 打包，并在你的仓库生成一个带版本号（例如 `MouseBattery-v1.0.0.exe`）的 GitHub Release 供用户下载。
+
+### 从源码手动打包 EXE
 
 ```powershell
 pip install pyinstaller
@@ -68,7 +82,7 @@ python build.py
 ## 🔧 运行依赖
 
 | 依赖 | 版本 | 用途 |
-|------|------|------|
+| :--- | :--- | :--- |
 | [hidapi](https://pypi.org/project/hidapi/) | ≥0.14 | HID 设备通信 |
 | [Pillow](https://pypi.org/project/Pillow/) | ≥10.0 | 绘制托盘图标 |
 | [pystray](https://pypi.org/project/pystray/) | ≥0.19 | 系统托盘功能 |
@@ -76,7 +90,7 @@ python build.py
 
 ## 🏗️ 项目结构
 
-```
+```text
 mouse-battery/
 ├── main.py          # 程序入口（托盘模式）
 ├── tray.py          # 系统托盘图标与菜单
@@ -112,6 +126,7 @@ mouse-battery/
 ## ❓ 常见问题
 
 **Q: 检测不到我的鼠标怎么办?**
+
 1. 确认鼠标通过 2.4G 无线接收器连接（不支持蓝牙）
 2. 雷蛇用户：确认设备型号在支持列表中
 3. 罗技用户：关闭 Logitech G Hub 后重试

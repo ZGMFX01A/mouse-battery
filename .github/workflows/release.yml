@@ -1,0 +1,60 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # 仅在推送以 v 开头的 tag 时触发 (例如 v1.0.0)
+  workflow_dispatch: # 允许在网页端手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: python build.py
+
+      - name: Rename executable
+        id: rename
+        run: |
+          # 提取版本号，如果不是 tag 触发，则使用 default
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $VERSION = "${{ github.ref_name }}"
+          } else {
+            $VERSION = "latest"
+          }
+          $NEW_NAME = "MouseBattery-$VERSION.exe"
+          Rename-Item -Path "dist/MouseBattery.exe" -NewName $NEW_NAME
+          echo "EXE_NAME=$NEW_NAME" >> $env:GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> $env:GITHUB_OUTPUT
+
+      - name: Release to GitHub
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') # 只有 tag 触发才创建 release
+        with:
+          name: Release ${{ steps.rename.outputs.VERSION }}
+          prerelease: false
+          files: dist/${{ steps.rename.outputs.EXE_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Artifact (可供手动下载)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.rename.outputs.EXE_NAME }}
+          path: dist/${{ steps.rename.outputs.EXE_NAME }}
