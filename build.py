@@ -17,7 +17,7 @@ def build():
         import PyInstaller
         print(f"PyInstaller {PyInstaller.__version__}")
     except ImportError:
-        print("请先安装 PyInstaller: pip install pyinstaller")
+        print("Error: PyInstaller not installed. Run: pip install pyinstaller")
         sys.exit(1)
 
     # 获取 flet 和 flet_desktop 的路径
@@ -39,7 +39,7 @@ def build():
         flet_desktop_dir = os.path.dirname(flet_desktop.__file__)
         cmd.extend(['--add-data', f'{flet_desktop_dir};flet_desktop'])
     except ImportError:
-        print("警告: 未找到 flet_desktop，正在跳过该包 (可能导致打包后无法运行 GUI界面)")
+        print("Warning: flet_desktop not found, skipping. (GUI may not run later)")
 
     # 隐式导入和其他启动文件
     cmd.extend([
@@ -56,12 +56,12 @@ def build():
     if os.path.exists(ico_path):
         cmd.extend(['--icon', ico_path])
 
-    print(f"运行: {' '.join(cmd)}")
+    print(f"Run: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=os.path.dirname(__file__) or '.')
     if result.returncode == 0:
-        print("\n✅ 打包成功！输出: dist/MouseBattery.exe")
+        print("\n✅ [SUCCESS] Build complete! Output: dist/MouseBattery.exe")
     else:
-        print(f"\n❌ 打包失败, 返回码: {result.returncode}")
+        print(f"\n❌ [ERROR] Build failed, return code: {result.returncode}")
     return result.returncode
 
 if __name__ == '__main__':
