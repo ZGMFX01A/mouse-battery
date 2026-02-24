@@ -139,6 +139,11 @@ mouse-battery/
 **Q: 电量数值和官方驱动不一致?**
 应与官方驱动一致（±1% 舍入误差）。如有较大差异请提交 Issue。
 
+## 👤 作者
+
+- **GitHub**: [ZGMFX01A](https://github.com/ZGMFX01A)
+- **Email**: 839140758@qq.com
+
 ## 📄 许可
 
 MIT License

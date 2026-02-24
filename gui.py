@@ -586,11 +586,23 @@ class MouseBatteryApp:
             )
         )
 
+        # 作者信息
+        author_info = ft.Container(
+            content=ft.Text(
+                "Made by ZGMFX01A · 839140758@qq.com",
+                size=11, color=COLORS['text_dim'],
+                text_align=ft.TextAlign.CENTER,
+                width=500,
+            ),
+            padding=ft.padding.only(bottom=5),
+        )
+
         # 将鼠标设备列表与设置面板打包放入可滚动的区域中，防止挤占底部状态栏
         scrollable_content = ft.Column(
             controls=[
                 card_container,
                 settings_card,
+                author_info,
             ],
             scroll=ft.ScrollMode.AUTO,
             expand=True,
