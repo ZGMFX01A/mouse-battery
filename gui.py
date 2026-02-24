@@ -279,6 +279,9 @@ class MouseBatteryApp:
 
         # 窗口配置
         page.title = "鼠标电量监控"
+        ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.ico')
+        if os.path.exists(ico_path):
+            page.window.icon = ico_path
         page.window.width = 520
         page.window.height = 700
         page.window.min_width = 460
