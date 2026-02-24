@@ -79,6 +79,10 @@ def launch_gui_mode():
     from gui import MouseBatteryApp
     
     def _flet_main(page: ft.Page):
+        page.title = "鼠标电量监控"
+        # 图标挂载至相对路径（打包环境或源码环境下的 app.ico）
+        page.window.icon = "app.ico"
+        
         # 独立的 DeviceManager
         dm = DeviceManager()
         app = MouseBatteryApp(dm)

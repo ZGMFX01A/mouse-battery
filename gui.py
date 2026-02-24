@@ -312,10 +312,13 @@ class MouseBatteryApp:
             dialog.actions[1].disabled = True
             self.page.update()
             
+            last_pct = [-1]
             def progress(pct, dl, total):
-                pb.value = pct / 100.0
-                status_txt.value = f"正在下载... {pct}%"
-                self.page.update()
+                if pct != last_pct[0]:
+                    last_pct[0] = pct
+                    pb.value = pct / 100.0
+                    status_txt.value = f"正在下载... {pct}%"
+                    self.page.update()
                 
             def worker():
                 success = updater.download_and_install(url, progress)

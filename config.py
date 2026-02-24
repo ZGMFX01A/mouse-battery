@@ -14,7 +14,7 @@ import updater
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "v1.3.0"
+APP_VERSION = "v1.4.7"
 
 # 获取当前程序实际路径，如果被 PyInstaller 打包，获取的是生成的 exe 路径
 if getattr(sys, 'frozen', False):
