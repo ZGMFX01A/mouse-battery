@@ -436,15 +436,24 @@ class MouseBatteryApp:
             )
         )
 
+        # 将鼠标设备列表与设置面板打包放入可滚动的区域中，防止挤占底部状态栏
+        scrollable_content = ft.Column(
+            controls=[
+                card_container,
+                settings_card,
+            ],
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+            spacing=15,
+        )
+
         # 组装页面
         page.add(
             ft.Column(
                 controls=[
                     header, 
                     divider, 
-                    card_container, 
-                    settings_card,
-                    ft.Container(expand=True),  # 顶满上方空间
+                    scrollable_content,
                     bottom_bar
                 ],
                 expand=True,
