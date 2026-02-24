@@ -4,6 +4,7 @@
 基于 Flet (Flutter for Python) 的现代化界面，展示鼠标电池状态。
 """
 
+import os
 import time
 import threading
 import logging
