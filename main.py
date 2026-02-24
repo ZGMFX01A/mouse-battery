@@ -87,8 +87,12 @@ def launch_gui_mode():
         app.build(page)
         
     logging.info("启动 Flet 设置界面...")
-    # assets_dir 指定资源目录，Flet 会自动识别 assets/icon.png 作为窗口图标
-    assets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+    # PyInstaller --onefile 模式下资源解压到 sys._MEIPASS，源码运行则用 __file__ 定位
+    if getattr(sys, 'frozen', False):
+        base_dir = sys._MEIPASS
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    assets_path = os.path.join(base_dir, 'assets')
     ft.app(target=_flet_main, assets_dir=assets_path)
 
 
