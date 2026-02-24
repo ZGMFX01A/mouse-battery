@@ -394,7 +394,7 @@ class MouseBatteryApp:
 
         # ========= 偏好设置 ========= 
         settings_card = ft.Card(
-            color=COLORS['bg_card'],
+            bgcolor=COLORS['bg_card'],
             elevation=2,
             content=ft.Container(
                 padding=20,
@@ -429,7 +429,7 @@ class MouseBatteryApp:
                                 ft.dropdown.Option("30", "30%"),
                             ],
                             text_style=ft.TextStyle(size=14),
-                            on_change=self._on_notify_change
+                            on_select=self._on_notify_change
                         )
                     )
                 ], spacing=10)
