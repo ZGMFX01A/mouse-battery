@@ -10,6 +10,7 @@ import os
 import logging
 import ctypes
 import subprocess
+import atexit
 
 from devices import DeviceManager
 from tray import TrayApp
@@ -36,15 +37,36 @@ def check_admin():
         return False
 
 
+_settings_processes = []
+
+
 def open_settings_window():
     """用子进程打开 Flet 设置窗口（避免 signal 线程限制）"""
+    global _settings_processes
+    # 清理已经退出的子进程句柄
+    _settings_processes = [p for p in _settings_processes if p.poll() is None]
+    
     try:
         # 当打包成 exe 后，sys.executable 会变成当前的 exe 路径
         # 因此通过传入 --gui 参数，再次启动本程序，但进入 GUI 逻辑
-        subprocess.Popen([sys.executable, '--gui'],
+        p = subprocess.Popen([sys.executable, '--gui'],
                          creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        _settings_processes.append(p)
     except Exception as e:
         logging.getLogger(__name__).error(f"设置窗口启动失败: {e}")
+
+
+@atexit.register
+def cleanup_settings_windows():
+    """退出主程序时，确保拉起的独立 GUI 进程被关闭"""
+    global _settings_processes
+    for p in _settings_processes:
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+    _settings_processes.clear()
 
 
 def launch_gui_mode():
