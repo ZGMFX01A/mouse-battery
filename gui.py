@@ -299,9 +299,7 @@ class MouseBatteryApp:
                     actions_alignment=ft.MainAxisAlignment.END,
                     shape=ft.RoundedRectangleBorder(radius=10)
                 )
-                self.page.dialog = dlg
-                dlg.open = True
-                self.page.update()
+                self.page.show_dialog(dlg)
                 
         threading.Thread(target=check, daemon=True).start()
 
@@ -351,9 +349,7 @@ class MouseBatteryApp:
             actions_alignment=ft.MainAxisAlignment.END,
             shape=ft.RoundedRectangleBorder(radius=10)
         )
-        self.page.dialog = dialog
-        dialog.open = True
-        self.page.update()
+        self.page.show_dialog(dialog)
 
     def _make_btn_content(self, icon_name, label: str) -> ft.Row:
         """创建按钮内部内容（icon + text）"""
