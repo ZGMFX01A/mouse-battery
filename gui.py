@@ -275,17 +275,32 @@ class MouseBatteryApp:
         
         def check():
             has_update, latest, url, body = updater.check_for_update(APP_VERSION)
+            btn.content = ft.Text("检查", size=13)
+            btn.disabled = False
+            self.page.update()
+            
             if has_update:
-                btn.content = ft.Text("检查", size=13)
-                btn.disabled = False
-                self.page.update()
                 self._show_update_dialog(latest, url, body)
             else:
-                btn.content = ft.Text("已是最新", size=13)
-                self.page.update()
-                time.sleep(2)
-                btn.content = ft.Text("检查", size=13)
-                btn.disabled = False
+                # 区分是已是最新还是网络错误
+                if latest:
+                    msg = f"当前版本 {APP_VERSION} 已经是最新版！"
+                else:
+                    msg = f"检查更新失败，请检查网络设置。\n错误信息: {body}"
+                    
+                def close_dlg(e):
+                    dlg.open = False
+                    self.page.update()
+                    
+                dlg = ft.AlertDialog(
+                    title=ft.Text("版本检查" if latest else "网络故障"),
+                    content=ft.Text(msg, size=13),
+                    actions=[ft.TextButton("确定", on_click=close_dlg)],
+                    actions_alignment=ft.MainAxisAlignment.END,
+                    shape=ft.RoundedRectangleBorder(radius=10)
+                )
+                self.page.dialog = dlg
+                dlg.open = True
                 self.page.update()
                 
         threading.Thread(target=check, daemon=True).start()

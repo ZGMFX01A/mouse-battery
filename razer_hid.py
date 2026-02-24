@@ -24,18 +24,18 @@ RAZER_REPORT_LEN = 90  # 每个 USB 报文 90 字节
 
 # 已知雷蛇无线 dongle PID
 RAZER_WIRELESS_PIDS = {
-    0x00AB: "巴塞利斯蛇 V3 (有线)",
-    0x00B9: "巴塞利斯蛇 V3 Pro (有线)",
-    0x00CD: "巴塞利斯蛇 V3 Pro (无线Dongle)",
-    0x00A5: "DeathAdder V3 Pro (无线Dongle)",
-    0x00B6: "DeathAdder V3 (无线Dongle)",
-    0x00AA: "Viper V2 Pro (无线Dongle)",
-    0x007A: "Viper Ultimate (无线Dongle)",
-    0x0088: "Basilisk X Hyperspeed (无线Dongle)",
-    0x0083: "Basilisk Ultimate (无线Dongle)",
-    0x0090: "DeathAdder V2 Pro (无线Dongle)",
-    0x008F: "Basilisk V3 (有线)",
-    0x00B5: "巴塞利斯蛇 V3 Pro (蓝牙)",
+    0x00AB: "巴塞利斯蛇 V3",
+    0x00B9: "巴塞利斯蛇 V3 Pro",
+    0x00CD: "巴塞利斯蛇 V3 Pro",
+    0x00A5: "DeathAdder V3 Pro",
+    0x00B6: "DeathAdder V3",
+    0x00AA: "Viper V2 Pro",
+    0x007A: "Viper Ultimate",
+    0x0088: "Basilisk X Hyperspeed",
+    0x0083: "Basilisk Ultimate",
+    0x0090: "DeathAdder V2 Pro",
+    0x008F: "Basilisk V3",
+    0x00B5: "巴塞利斯蛇 V3 Pro",
 }
 
 # 能查询电池的 PID 集合（无线 dongle）
