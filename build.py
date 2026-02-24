@@ -24,6 +24,9 @@ def build():
     import flet
     flet_dir = os.path.dirname(flet.__file__)
     
+    # assets 目录路径
+    assets_dir = os.path.join(os.path.dirname(__file__) or '.', 'assets')
+    
     cmd = [
         sys.executable, '-m', 'PyInstaller',
         '--onefile',
@@ -32,6 +35,8 @@ def build():
         '--clean',
         # Flet 依赖资源
         '--add-data', f'{flet_dir};flet',
+        # 应用 assets（含窗口图标等）
+        '--add-data', f'{assets_dir};assets',
     ]
 
     try:

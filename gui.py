@@ -273,11 +273,37 @@ class MouseBatteryApp:
         btn.content = ft.Text("检查中...", size=13)
         self.page.update()
         
+        done_event = threading.Event()
+        result_holder = [None]  # (has_update, latest, url, body)
+        
         def check():
-            has_update, latest, url, body = updater.check_for_update(APP_VERSION)
+            result_holder[0] = updater.check_for_update(APP_VERSION)
+            done_event.set()
+        
+        def watchdog():
+            threading.Thread(target=check, daemon=True).start()
+            finished = done_event.wait(timeout=10)
+            
             btn.content = ft.Text("检查", size=13)
             btn.disabled = False
             self.page.update()
+            
+            if not finished:
+                # 超时了
+                def close_dlg(e):
+                    dlg.open = False
+                    self.page.update()
+                dlg = ft.AlertDialog(
+                    title=ft.Text("网络超时"),
+                    content=ft.Text("检查更新超时，请检查网络连接后重试。", size=13),
+                    actions=[ft.TextButton("确定", on_click=close_dlg)],
+                    actions_alignment=ft.MainAxisAlignment.END,
+                    shape=ft.RoundedRectangleBorder(radius=10)
+                )
+                self.page.show_dialog(dlg)
+                return
+            
+            has_update, latest, url, body = result_holder[0]
             
             if has_update:
                 self._show_update_dialog(latest, url, body)
@@ -301,7 +327,7 @@ class MouseBatteryApp:
                 )
                 self.page.show_dialog(dlg)
                 
-        threading.Thread(target=check, daemon=True).start()
+        threading.Thread(target=watchdog, daemon=True).start()
 
     def _show_update_dialog(self, version: str, url: str, body: str):
         pb = ft.ProgressBar(width=400, color=COLORS['accent_blue'], value=0)

@@ -80,8 +80,6 @@ def launch_gui_mode():
     
     def _flet_main(page: ft.Page):
         page.title = "鼠标电量监控"
-        # 图标挂载至相对路径（打包环境或源码环境下的 app.ico）
-        page.window.icon = "app.ico"
         
         # 独立的 DeviceManager
         dm = DeviceManager()
@@ -89,7 +87,9 @@ def launch_gui_mode():
         app.build(page)
         
     logging.info("启动 Flet 设置界面...")
-    ft.app(target=_flet_main)
+    # assets_dir 指定资源目录，Flet 会自动识别 assets/icon.png 作为窗口图标
+    assets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+    ft.app(target=_flet_main, assets_dir=assets_path)
 
 
 if __name__ == '__main__':
