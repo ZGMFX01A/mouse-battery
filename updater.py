@@ -40,6 +40,9 @@ def check_for_update(current_version: str) -> tuple[bool, str, str, str]:
             
             latest_version = data.get('tag_name', '')
             body = data.get('body', '')
+            if not body:
+                body = "（此次发布未提供更新日志说明）"
+            
             assets = data.get('assets', [])
             
             # 找到 exe 下载链接
