@@ -26,6 +26,8 @@ def build():
     
     # assets 目录路径
     assets_dir = os.path.join(os.path.dirname(__file__) or '.', 'assets')
+    # app.ico 文件路径（用于运行时 Windows API 设置窗口图标）
+    ico_file = os.path.join(os.path.dirname(__file__) or '.', 'app.ico')
     
     cmd = [
         sys.executable, '-m', 'PyInstaller',
@@ -37,6 +39,8 @@ def build():
         '--add-data', f'{flet_dir};flet',
         # 应用 assets（含窗口图标等）
         '--add-data', f'{assets_dir};assets',
+        # app.ico 放到根目录供 ctypes LoadImageW 加载
+        '--add-data', f'{ico_file};.',
     ]
 
     try:

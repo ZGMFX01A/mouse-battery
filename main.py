@@ -78,8 +78,40 @@ def launch_gui_mode():
     import flet as ft
     from gui import MouseBatteryApp
     
+    # 确定资源基准目录
+    if getattr(sys, 'frozen', False):
+        base_dir = sys._MEIPASS
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    def _set_window_icon(title: str):
+        """通过 Windows API 强制设置窗口图标（Flet 自身不支持桌面窗口图标）"""
+        import time
+        user32 = ctypes.windll.user32
+        ico_path = os.path.join(base_dir, 'app.ico')
+        if not os.path.exists(ico_path):
+            logging.warning(f"图标文件不存在: {ico_path}")
+            return
+        hicon_big = user32.LoadImageW(None, ico_path, 1, 0, 0, 0x10)
+        hicon_small = user32.LoadImageW(None, ico_path, 1, 16, 16, 0x10)
+        if not hicon_big:
+            return
+        # 轮询等待窗口出现
+        import time
+        for _ in range(10):
+            hwnd = user32.FindWindowW(None, title)
+            if hwnd:
+                user32.SendMessageW(hwnd, 0x80, 1, hicon_big)   # WM_SETICON, ICON_BIG
+                user32.SendMessageW(hwnd, 0x80, 0, hicon_small) # WM_SETICON, ICON_SMALL
+                logging.info("窗口图标已通过 Windows API 设置")
+                return
+            time.sleep(0.5)
+    
     def _flet_main(page: ft.Page):
         page.title = "鼠标电量监控"
+        # 后台线程设置窗口图标
+        import threading
+        threading.Thread(target=_set_window_icon, args=(page.title,), daemon=True).start()
         
         # 独立的 DeviceManager
         dm = DeviceManager()
@@ -87,11 +119,6 @@ def launch_gui_mode():
         app.build(page)
         
     logging.info("启动 Flet 设置界面...")
-    # PyInstaller --onefile 模式下资源解压到 sys._MEIPASS，源码运行则用 __file__ 定位
-    if getattr(sys, 'frozen', False):
-        base_dir = sys._MEIPASS
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
     assets_path = os.path.join(base_dir, 'assets')
     ft.app(target=_flet_main, assets_dir=assets_path)
 
