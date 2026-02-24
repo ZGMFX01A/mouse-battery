@@ -63,7 +63,11 @@ def cleanup_settings_windows():
     for p in _settings_processes:
         if p.poll() is None:
             try:
-                p.terminate()
+                if os.name == 'nt':
+                    subprocess.call(['taskkill', '/F', '/T', '/PID', str(p.pid)],
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+                else:
+                    p.terminate()
             except Exception:
                 pass
     _settings_processes.clear()
