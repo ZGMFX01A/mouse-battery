@@ -14,7 +14,20 @@ import updater
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "v1.4.7"
+def _read_version() -> str:
+    """从 VERSION 文件读取版本号，兼容打包与源码环境"""
+    if getattr(sys, 'frozen', False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    version_file = os.path.join(base, 'VERSION')
+    try:
+        with open(version_file, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "dev"
+
+APP_VERSION = _read_version()
 
 # 获取当前程序实际路径，如果被 PyInstaller 打包，获取的是生成的 exe 路径
 if getattr(sys, 'frozen', False):

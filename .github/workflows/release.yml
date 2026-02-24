@@ -29,6 +29,13 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Inject version from tag
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}" | Out-File -FilePath VERSION -Encoding utf8 -NoNewline
+          }
+          Write-Host "VERSION content: $(Get-Content VERSION)"
+
       - name: Build with PyInstaller
         run: python build.py
 

@@ -41,6 +41,8 @@ def build():
         '--add-data', f'{assets_dir};assets',
         # app.ico 放到根目录供 ctypes LoadImageW 加载
         '--add-data', f'{ico_file};.',
+        # VERSION 文件放到根目录供 config.py 读取版本号
+        '--add-data', f'{os.path.join(os.path.dirname(__file__) or ".", "VERSION")};.',
     ]
 
     try:
