@@ -12,6 +12,7 @@ from typing import Optional
 import flet as ft
 
 from devices import DeviceManager, MouseInfo, Brand
+from config import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +251,7 @@ class MouseBatteryApp:
 
     def __init__(self, device_manager: DeviceManager):
         self.device_manager = device_manager
+        self.config_manager = ConfigManager()
         self.device_manager.set_on_update(self._on_device_update)
         self.page: Optional[ft.Page] = None
         self.card_list: Optional[ft.Column] = None
@@ -390,10 +392,61 @@ class MouseBatteryApp:
             padding=ft.padding.symmetric(horizontal=15, vertical=10),
         )
 
+        # ========= 偏好设置 ========= 
+        settings_card = ft.Card(
+            color=COLORS['bg_card'],
+            elevation=2,
+            content=ft.Container(
+                padding=20,
+                content=ft.Column([
+                    ft.Text("⚙️ 个性化设置", size=18, weight=ft.FontWeight.W_600, color="white"),
+                    ft.Divider(height=1, color=COLORS['bg_card_border']),
+                    
+                    # 1. 开机自启
+                    ft.ListTile(
+                        leading=ft.Icon(ft.Icons.ROCKET_LAUNCH, color="#8888AA"),
+                        title=ft.Text("开机自动启动", color="white", size=14),
+                        subtitle=ft.Text("跟随 Windows 启动，在后台静默运行", color="#8888AA", size=12),
+                        trailing=ft.Switch(
+                            value=self.config_manager.check_autostart(),
+                            active_color=COLORS['accent_blue'],
+                            on_change=self._on_autostart_toggle
+                        )
+                    ),
+                    
+                    # 2. 低电量提醒
+                    ft.ListTile(
+                        leading=ft.Icon(ft.Icons.BATTERY_ALERT, color=COLORS['battery_low']),
+                        title=ft.Text("低电量弹窗提醒", color="white", size=14),
+                        subtitle=ft.Text("系统右下角弹出通知，防止突然断电", color="#8888AA", size=12),
+                        trailing=ft.Dropdown(
+                            width=100,
+                            value=str(self.config_manager.low_battery_notify),
+                            options=[
+                                ft.dropdown.Option("0", "关闭"),
+                                ft.dropdown.Option("10", "10%"),
+                                ft.dropdown.Option("20", "20%"),
+                                ft.dropdown.Option("30", "30%"),
+                            ],
+                            text_style=ft.TextStyle(size=14),
+                            on_change=self._on_notify_change
+                        )
+                    )
+                ], spacing=10)
+            )
+        )
+
         # 组装页面
         page.add(
             ft.Column(
-                controls=[header, divider, card_container, bottom_bar],
+                controls=[
+                    header, 
+                    divider, 
+                    card_container, 
+                    settings_card,
+                    ft.Container(expand=True),  # 顶满上方空间
+                    bottom_bar
+                ],
                 expand=True,
                 spacing=0,
             )
@@ -481,6 +534,14 @@ class MouseBatteryApp:
             self.device_manager.start_auto_refresh(60)
         else:
             self.device_manager.stop_auto_refresh()
+
+    def _on_autostart_toggle(self, e):
+        self.config_manager.set_autostart(e.control.value)
+
+    def _on_notify_change(self, e):
+        val = int(e.control.value)
+        self.config_manager.low_battery_notify = val
+        logger.info(f"低电量提醒修改为: {val}%")
 
     def _safe_update(self):
         try:

@@ -13,6 +13,7 @@ import subprocess
 
 from devices import DeviceManager
 from tray import TrayApp
+from config import ConfigManager
 
 
 def setup_logging():
@@ -77,12 +78,14 @@ if __name__ == '__main__':
     if not check_admin():
         logger.warning("未以管理员身份运行，可能无法访问部分 HID 设备")
 
-    # 初始化设备管理器
+    # 初始化设备管理器与配置管理器
     device_manager = DeviceManager()
+    config_manager = ConfigManager()
 
     # 以托盘模式启动（阻塞）
     tray = TrayApp(
-        device_manager,
+        device_manager=device_manager,
+        config_manager=config_manager,
         on_open_settings=open_settings_window,
     )
     tray.start()

@@ -21,6 +21,7 @@ import pystray
 from pystray import MenuItem, Menu
 
 from devices import DeviceManager, MouseInfo, Brand
+from config import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -148,8 +149,10 @@ class TrayApp:
     """系统托盘电量监控"""
 
     def __init__(self, device_manager: DeviceManager,
+                 config_manager: ConfigManager,
                  on_open_settings: Optional[Callable] = None):
         self.device_manager = device_manager
+        self.config_manager = config_manager
         self.on_open_settings = on_open_settings
         self._tray: Optional[pystray.Icon] = None
         self._running = False
@@ -218,6 +221,18 @@ class TrayApp:
                 p = f"{m.percentage}%" if m.percentage >= 0 else "N/A"
                 c = " ⚡" if m.charging else ""
                 lines.append(f"{m.name}: {p}{c}")
+                
+                # 判断是否需要低电量通知 (跌穿阈值 且 未充电)
+                if not m.charging and self.config_manager.should_notify(m.name, m.percentage):
+                    try:
+                        self._tray.notify(
+                            f"{m.name} 当前电量只有 {m.percentage}%，请及时充电！",
+                            title="鼠标电量告警"
+                        )
+                        logger.info(f"触发低电量弹窗: {m.name} {m.percentage}%")
+                    except Exception as e:
+                        logger.error(f"弹窗通知失败: {e}")
+                        
             self._tray.title = "\n".join(lines)[:127]
         self._tray.menu = self._build_menu()
 
