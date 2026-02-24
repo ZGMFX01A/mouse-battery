@@ -48,6 +48,7 @@ def build():
         '--hidden-import', 'hid',
         '--hidden-import', 'flet',
         '--hidden-import', 'gui',
+        '--hidden-import', 'updater',
         'main.py',
     ])
 
