@@ -13,7 +13,8 @@ from typing import Optional
 import flet as ft
 
 from devices import DeviceManager, MouseInfo, Brand
-from config import ConfigManager
+from config import ConfigManager, APP_VERSION
+import updater
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +264,82 @@ class MouseBatteryApp:
         self.status_text: Optional[ft.Text] = None
         self.auto_switch: Optional[ft.Switch] = None
 
+    def _on_autoupdate_toggle(self, e):
+        self.config_manager.auto_update = e.control.value
+
+    def _on_check_update_click(self, e):
+        btn = e.control
+        btn.disabled = True
+        btn.content = ft.Text("检查中...", size=13)
+        self.page.update()
+        
+        def check():
+            has_update, latest, url, body = updater.check_for_update(APP_VERSION)
+            if has_update:
+                btn.content = ft.Text("检查", size=13)
+                btn.disabled = False
+                self.page.update()
+                self._show_update_dialog(latest, url, body)
+            else:
+                btn.content = ft.Text("已是最新", size=13)
+                self.page.update()
+                time.sleep(2)
+                btn.content = ft.Text("检查", size=13)
+                btn.disabled = False
+                self.page.update()
+                
+        threading.Thread(target=check, daemon=True).start()
+
+    def _show_update_dialog(self, version: str, url: str, body: str):
+        pb = ft.ProgressBar(width=400, color=COLORS['accent_blue'], value=0)
+        status_txt = ft.Text(f"准备升级到 {version}...", color=COLORS['text_dim'], size=12)
+        
+        def do_update(e):
+            dialog.actions[0].disabled = True
+            dialog.actions[1].disabled = True
+            self.page.update()
+            
+            def progress(pct, dl, total):
+                pb.value = pct / 100.0
+                status_txt.value = f"正在下载... {pct}%"
+                self.page.update()
+                
+            def worker():
+                success = updater.download_and_install(url, progress)
+                if not success:
+                    status_txt.value = "更新失败或仍在调试环境中，请直接去 GitHub 下载"
+                    dialog.actions[1].disabled = False # 允许关闭
+                    self.page.update()
+            threading.Thread(target=worker, daemon=True).start()
+
+        def close_dialog(e):
+            dialog.open = False
+            self.page.update()
+
+        dialog = ft.AlertDialog(
+            title=ft.Text(f"发现新版本 {version}"),
+            content=ft.Column([
+                ft.Text("发版更新记录：", size=13),
+                ft.Container(
+                    content=ft.Text(body, size=12, color=COLORS['text_dim'], selectable=True),
+                    height=100,
+                    # 支持简单滚动
+                ),
+                ft.Container(height=5),
+                status_txt,
+                pb
+            ], tight=True),
+            actions=[
+                ft.TextButton("立即热更新", on_click=do_update),
+                ft.TextButton("稍后", on_click=close_dialog)
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            shape=ft.RoundedRectangleBorder(radius=10)
+        )
+        self.page.dialog = dialog
+        dialog.open = True
+        self.page.update()
+
     def _make_btn_content(self, icon_name, label: str) -> ft.Row:
         """创建按钮内部内容（icon + text）"""
         return ft.Row(
@@ -422,7 +499,7 @@ class MouseBatteryApp:
                     ft.ListTile(
                         leading=ft.Icon(ft.Icons.BATTERY_ALERT, color=COLORS['battery_low']),
                         title=ft.Text("低电量弹窗提醒", color="white", size=14),
-                        subtitle=ft.Text("系统右下角弹出通知，防止突然断电", color="#8888AA", size=12),
+                        subtitle=ft.Text("系统右下角弹出通知，阶梯防漏式告警", color="#8888AA", size=12),
                         trailing=ft.Dropdown(
                             width=100,
                             value=str(self.config_manager.low_battery_notify),
@@ -434,6 +511,35 @@ class MouseBatteryApp:
                             ],
                             text_style=ft.TextStyle(size=14),
                             on_select=self._on_notify_change
+                        )
+                    ),
+
+                    # 3. 自动更新与版本
+                    ft.ListTile(
+                        leading=ft.Icon(ft.Icons.SYSTEM_UPDATE_ALT, color="#8888AA"),
+                        title=ft.Text(f"版本更新 (当前 {APP_VERSION})", color="white", size=14),
+                        subtitle=ft.Text("允许程序在启动时自动下载新版本并静默升级", color="#8888AA", size=12),
+                        trailing=ft.Container(
+                            width=135,
+                            content=ft.Row(
+                                [
+                                    ft.ElevatedButton(
+                                        content=ft.Text("检查", size=13),
+                                        on_click=self._on_check_update_click,
+                                        style=ft.ButtonStyle(
+                                            padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                                            shape=ft.RoundedRectangleBorder(radius=6)
+                                        )
+                                    ),
+                                    ft.Switch(
+                                        value=self.config_manager.auto_update,
+                                        active_color=COLORS['accent_blue'],
+                                        on_change=self._on_autoupdate_toggle
+                                    )
+                                ],
+                                alignment=ft.MainAxisAlignment.END,
+                                spacing=5
+                            )
                         )
                     )
                 ], spacing=10)

@@ -10,7 +10,11 @@ import json
 import logging
 import winreg
 
+import updater
+
 logger = logging.getLogger(__name__)
+
+APP_VERSION = "v1.3.0"
 
 # 获取当前程序实际路径，如果被 PyInstaller 打包，获取的是生成的 exe 路径
 if getattr(sys, 'frozen', False):
@@ -28,10 +32,14 @@ class ConfigManager:
     """管理应用的用户配置和自启状态"""
 
     def __init__(self):
+        # 启动时先清理上次热更新可能遗留的旧版执行文件被占用导致的残留
+        updater.clean_old_version()
+        
         # 默认配置
         self.config = {
             "low_battery_notify": 20, # 默认 20%
-            "notified_levels": {} # 记录每个鼠标上次被通知时的电量，防重复弹窗
+            "notified_levels": {}, # 记录每个鼠标上次被通知时的电量，防重复弹窗
+            "auto_update": False # 默认不自动更新
         }
         self.load()
 
@@ -62,6 +70,15 @@ class ConfigManager:
         self.config["low_battery_notify"] = val
         # 重置所有已经通知过的状态，即使用户修改了阈值，也能重新触发一次
         self.config["notified_levels"] = {}
+        self.save()
+
+    @property
+    def auto_update(self) -> bool:
+        return self.config.get("auto_update", False)
+        
+    @auto_update.setter
+    def auto_update(self, val: bool):
+        self.config["auto_update"] = val
         self.save()
 
     def check_autostart(self) -> bool:

@@ -21,7 +21,8 @@ import pystray
 from pystray import MenuItem, Menu
 
 from devices import DeviceManager, MouseInfo, Brand
-from config import ConfigManager
+from config import ConfigManager, APP_VERSION
+import updater
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,16 @@ class TrayApp:
             time.sleep(0.5)
             self.device_manager.scan_and_refresh()
             self.device_manager.start_auto_refresh(60)
+            
+            # 后台静默检查更新
+            if self.config_manager.auto_update:
+                def auto_check():
+                    time.sleep(10) # 延迟10秒执行，避免抢占启动阶段资源
+                    has_update, _, url, _ = updater.check_for_update(APP_VERSION)
+                    if has_update:
+                        logger.info("系统后台发现新版本，开始静默下载升级...")
+                        updater.download_and_install(url)
+                threading.Thread(target=auto_check, daemon=True).start()
         threading.Thread(target=boot, daemon=True).start()
 
         logger.info("托盘图标已启动")
