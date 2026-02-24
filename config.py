@@ -100,8 +100,8 @@ class ConfigManager:
         为了防重复，若当前电量跌穿阈值，仅返回 True 并在内存标记之。
         """
         threshold = self.low_battery_notify
-        if threshold == 0 or current_pct < 0:
-            return False # 0表示永不通知或设备未就绪
+        if threshold == 0 or current_pct <= 0:
+            return False # 0或负数表示永不通知、休眠或设备未就绪
 
         notified_levels = self.config.setdefault("notified_levels", {})
         last_notified = notified_levels.get(device_name, 101)

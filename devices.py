@@ -156,10 +156,17 @@ class DeviceManager:
                 with self._lock:
                     mouse = self._mice[idx]
                     if battery:
-                        mouse.percentage = battery.percentage
-                        mouse.charging = battery.charging
-                        mouse.status_text = battery.status_text
-                        mouse.online = True
+                        # 硬件层面：任何返回 0 的结果几乎肯定是设备未就绪/深度休眠
+                        if battery.percentage <= 0:
+                            mouse.percentage = -1
+                            mouse.charging = False
+                            mouse.status_text = "休眠或连接中断"
+                            mouse.online = False
+                        else:
+                            mouse.percentage = battery.percentage
+                            mouse.charging = battery.charging
+                            mouse.status_text = battery.status_text
+                            mouse.online = True
                     else:
                         mouse.status_text = "无法读取电量"
                         mouse.online = False
@@ -180,10 +187,16 @@ class DeviceManager:
                 with self._lock:
                     mouse = self._mice[idx]
                     if battery:
-                        mouse.percentage = battery.percentage
-                        mouse.charging = battery.charging
-                        mouse.status_text = battery.status_text
-                        mouse.online = True
+                        if battery.percentage <= 0:
+                            mouse.percentage = -1
+                            mouse.charging = False
+                            mouse.status_text = "休眠或连接中断"
+                            mouse.online = False
+                        else:
+                            mouse.percentage = battery.percentage
+                            mouse.charging = battery.charging
+                            mouse.status_text = battery.status_text
+                            mouse.online = True
                     else:
                         mouse.status_text = "无法读取电量"
                         mouse.online = False
