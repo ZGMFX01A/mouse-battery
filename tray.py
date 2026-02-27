@@ -223,10 +223,15 @@ class TrayApp:
         mice = self.device_manager.mice
         if not mice:
             self._tray.icon = create_battery_icon(-1)
-            self._tray.title = "鼠标电量监控\n未发现设备"
+            self._tray.title = "鼠标电量监控\n未发现设备或已休眠"
         else:
-            low = min(mice, key=lambda m: m.percentage if m.percentage >= 0 else 999)
-            self._tray.icon = create_battery_icon(low.percentage, low.charging)
+            valid_mice = [m for m in mice if m.percentage >= 0]
+            if not valid_mice:
+                self._tray.icon = create_battery_icon(-1)
+            else:
+                low = min(valid_mice, key=lambda m: m.percentage)
+                self._tray.icon = create_battery_icon(low.percentage, low.charging)
+                
             lines = ["鼠标电量监控"]
             for m in mice:
                 p = f"{m.percentage}%" if m.percentage >= 0 else "N/A"

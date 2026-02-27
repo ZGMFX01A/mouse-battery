@@ -4,7 +4,10 @@
 统一管理罗技和雷蛇鼠标设备的扫描、连接和电池状态查询。
 """
 
+import json
 import logging
+import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -80,11 +83,33 @@ class DeviceManager:
 
     def _notify_update(self):
         """通知所有订阅者数据已更新"""
+        self._write_shared_state()
         for cb in self._on_update_callbacks:
             try:
                 cb()
             except Exception as e:
                 logger.error(f"更新回调出错: {e}")
+
+    def _write_shared_state(self):
+        """将当前设备状态写入共享 JSON 文件，供 GUI 子进程读取"""
+        state_file = get_shared_state_path()
+        try:
+            with self._lock:
+                data = []
+                for m in self._mice:
+                    data.append({
+                        'name': m.name,
+                        'brand': m.brand.value if hasattr(m.brand, 'value') else str(m.brand),
+                        'percentage': m.percentage,
+                        'charging': m.charging,
+                        'status_text': m.status_text,
+                        'online': m.online,
+                        'last_update': m.last_update,
+                    })
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"写入共享状态文件失败: {e}")
 
     def scan_and_refresh(self):
         """扫描设备并刷新电池状态"""
@@ -152,7 +177,11 @@ class DeviceManager:
             if idx >= len(self._mice):
                 break
             try:
-                battery = receiver.get_battery()
+                # 按 PID 分支：G903 (0xC539) 和 G502X (0xC547) 走专用长报文路径，其他设备走原始短报文
+                if receiver.product_id in (0xC539, 0xC547):
+                    battery = receiver.get_battery_legacy_long()
+                else:
+                    battery = receiver.get_battery()
                 with self._lock:
                     mouse = self._mice[idx]
                     if battery:
@@ -168,8 +197,8 @@ class DeviceManager:
                             mouse.status_text = battery.status_text
                             mouse.online = True
                     else:
-                        mouse.status_text = "无法读取电量"
-                        mouse.online = False
+                        mouse.status_text = "休眠中"
+                        # 罗技接收器在就始终显示，不设 online=False
                     mouse.last_update = time.time()
             except Exception as e:
                 logger.error(f"刷新罗技设备电池失败: {e}")
@@ -258,7 +287,7 @@ class DeviceManager:
         names = {
             0xC541: "G903 / G703 (Lightspeed)",
             0xC547: "G502X (Lightspeed)",
-            0xC539: "G Pro Wireless (Lightspeed)",
+            0xC539: "G903 (Lightspeed)",
             0xC53F: "G305 (Lightspeed)",
             0xC53A: "Lightspeed 鼠标",
             0xC53D: "Lightspeed 鼠标",
@@ -267,3 +296,114 @@ class DeviceManager:
             0xC52B: "Unifying 鼠标",
         }
         return names.get(receiver_pid, f"罗技鼠标 (0x{receiver_pid:04X})")
+
+
+def get_shared_state_path() -> str:
+    """获取共享状态文件路径"""
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, '.device_state.json')
+
+
+class SharedStateDeviceManager:
+    """
+    只读的设备管理器，通过读取共享状态文件获取数据。
+    供 GUI 子进程使用，不打开任何 HID 设备，避免句柄争抢。
+    """
+
+    def __init__(self):
+        self._mice: list[MouseInfo] = []
+        self._lock = threading.Lock()
+        self._on_update_callbacks: list[Callable] = []
+        self._auto_refresh_running = False
+        self._auto_refresh_thread: Optional[threading.Thread] = None
+        self._refresh_interval = 3
+
+    @property
+    def mice(self) -> list[MouseInfo]:
+        with self._lock:
+            return list(self._mice)
+
+    def set_on_update(self, callback: Callable):
+        if callback not in self._on_update_callbacks:
+            self._on_update_callbacks.append(callback)
+
+    def add_on_update(self, callback: Callable):
+        if callback not in self._on_update_callbacks:
+            self._on_update_callbacks.append(callback)
+
+    def remove_on_update(self, callback: Callable):
+        if callback in self._on_update_callbacks:
+            self._on_update_callbacks.remove(callback)
+
+    def _notify_update(self):
+        for cb in self._on_update_callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def _read_shared_state(self):
+        """从共享状态文件读取设备数据"""
+        state_file = get_shared_state_path()
+        try:
+            if not os.path.exists(state_file):
+                return
+            with open(state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            mice = []
+            for item in data:
+                try:
+                    brand = Brand(item.get('brand', '罗技'))
+                except (ValueError, KeyError):
+                    brand = Brand.LOGITECH
+                mouse = MouseInfo(
+                    name=item.get('name', '未知设备'),
+                    brand=brand,
+                    percentage=item.get('percentage', -1),
+                    charging=item.get('charging', False),
+                    status_text=item.get('status_text', '未知'),
+                    online=item.get('online', False),
+                    last_update=item.get('last_update', 0),
+                )
+                mice.append(mouse)
+            with self._lock:
+                self._mice = mice
+        except Exception as e:
+            logger.debug(f"读取共享状态文件失败: {e}")
+
+    def scan_and_refresh(self):
+        self._read_shared_state()
+        self._notify_update()
+
+    def refresh_only(self):
+        self._read_shared_state()
+        self._notify_update()
+
+    def start_auto_refresh(self, interval: int = 3):
+        self._refresh_interval = interval
+        if self._auto_refresh_running:
+            return
+        self._auto_refresh_running = True
+        self._auto_refresh_thread = threading.Thread(
+            target=self._auto_refresh_loop, daemon=True
+        )
+        self._auto_refresh_thread.start()
+
+    def stop_auto_refresh(self):
+        self._auto_refresh_running = False
+
+    def _auto_refresh_loop(self):
+        while self._auto_refresh_running:
+            time.sleep(self._refresh_interval)
+            if not self._auto_refresh_running:
+                break
+            try:
+                self.refresh_only()
+            except Exception:
+                pass
+
+    def shutdown(self):
+        self.stop_auto_refresh()

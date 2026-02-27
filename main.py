@@ -46,6 +46,11 @@ def open_settings_window():
     # 清理已经退出的子进程句柄
     _settings_processes = [p for p in _settings_processes if p.poll() is None]
     
+    # 单窗口防护：如果已有活动的 GUI 子进程，不再重复打开
+    if _settings_processes:
+        logging.getLogger(__name__).info("设置窗口已打开，不重复创建")
+        return
+    
     try:
         # 当打包成 exe 后，sys.executable 会变成当前的 exe 路径
         # 因此通过传入 --gui 参数，再次启动本程序，但进入 GUI 逻辑
@@ -113,8 +118,9 @@ def launch_gui_mode():
         import threading
         threading.Thread(target=_set_window_icon, args=(page.title,), daemon=True).start()
         
-        # 独立的 DeviceManager
-        dm = DeviceManager()
+        # 使用只读的共享状态 DeviceManager，不打开任何 HID 设备
+        from devices import SharedStateDeviceManager
+        dm = SharedStateDeviceManager()
         app = MouseBatteryApp(dm)
         app.build(page)
         

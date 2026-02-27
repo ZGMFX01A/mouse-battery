@@ -153,13 +153,14 @@ class LogitechReceiver:
                     resp = bytes(response)
                     # 检查是否是我们期望的响应（匹配 device_index 和 feature_index）
                     if len(resp) >= 4:
-                        # 错误响应: report_id=0x10, sub_id=0x8F
+                        # 错误响应: report_id=0x10或0x11, 且 byte 2 == 0x8F
                         if resp[2] == 0x8F:
                             logger.debug(f"HID++ 错误响应: {resp.hex()}")
                             return None
-                        # 匹配 device_index
-                        if resp[1] == data[1]:
-                            return resp
+                        # 匹配 device_index 还要匹配 feature_index 甚至 function 所在的 byte 3
+                        if resp[1] == data[1] and len(resp) >= len(data):
+                            if resp[2] == data[2] and (resp[3] & 0xF0) == (data[3] & 0xF0):
+                                return resp
                 time.sleep(0.01)
 
             logger.debug("HID++ 响应超时")
@@ -334,6 +335,207 @@ class LogitechReceiver:
         logger.warning(f"无法从设备 {device_index} 获取电池信息")
         return None
 
+    def get_device_name(self, device_index: int) -> Optional[str]:
+        """通过 GET_DEVICE_NAME (0x0005) 获取真实鼠标名称"""
+        idx = self.get_feature_index(device_index, 0x0005)
+        if idx is None:
+            return None
+
+        # Function 0: GetCount
+        response = self._send_short(device_index, idx, 0x00)
+        if not response or len(response) < 5:
+            return None
+
+        name_len = response[4]
+        if name_len == 0:
+            return None
+
+        name_bytes = bytearray()
+        # Function 1: GetDeviceName, 参数: char_index
+        for offset in range(0, name_len, 16):
+            resp = self._send_long(device_index, idx, 0x01, offset)
+            if resp and len(resp) >= 20:
+                chunk = resp[4:20]
+                name_bytes.extend(chunk)
+
+        name_bytes = name_bytes[:name_len]
+        try:
+            end = name_bytes.find(0)
+            if end != -1:
+                name_bytes = name_bytes[:end]
+            return name_bytes.decode('utf-8', errors='ignore')
+        except Exception:
+            return None
+
+    def ping_device(self, device_index: int) -> bool:
+        """
+        快速探测设备是否在线（300ms 超时）
+        只要收到任何响应（包括错误响应），就说明该槽位有设备
+        """
+        data = [HIDPP_SHORT_MSG, device_index, 0x00, 0x00, 0x00, 0x00, 0x00]
+        
+        if not self._device:
+            return False
+            
+        try:
+            self._device.write(bytes(data))
+            start = time.monotonic()
+            
+            while (time.monotonic() - start) * 1000 < 300:
+                response = self._device.read(64)
+                if response:
+                    resp = bytes(response)
+                    if len(resp) >= 4 and resp[1] == device_index:
+                        return True
+                time.sleep(0.01)
+        except Exception:
+            pass
+        return False
+
+    def get_battery_legacy_long(self, device_index: int = DEVICE_INDEX_FIRST) -> Optional[BatteryInfo]:
+        """
+        长报文专用电池读取（如 G903、G502X 的部分端点）
+        直接打开 usage=0x0002 的长消息通道，用长报文读取 0x1000, 0x1001, 0x1004 电压
+        """
+        try:
+            # 枚举该接收器的所有端点，找到 usage=2 (长消息通道)
+            all_devs = hid.enumerate(LOGITECH_VID, self.product_id)
+            long_path = None
+            for d in all_devs:
+                if d.get('usage_page', 0) == 0xFF00 and d.get('usage', 0) == 0x0002:
+                    long_path = d['path']
+                    break
+            
+            if not long_path:
+                logger.debug(f"{self.product_string} 未找到 usage=2 的长消息通道")
+                return None
+            
+            # 打开独立句柄（不影响主 receiver）
+            dev = hid.device()
+            dev.open_path(long_path)
+            dev.set_nonblocking(True)
+            
+            try:
+                # 首先尝试发 ping 获取活动的 device_index？
+                # 不需要，因为我们要试的 feature 比这个明确。
+                
+                # 尝试长报文获取 0x1004 (统一电池) 
+                query = [HIDPP_LONG_MSG, device_index, 0x00, 0x0A, 0x10, 0x04] + [0] * 14
+                dev.write(bytes(query))
+                
+                start = time.monotonic()
+                feat_idx = None
+                while (time.monotonic() - start) * 1000 < 500:
+                    resp = dev.read(64)
+                    if resp:
+                        r = bytes(resp)
+                        if len(r) >= 5 and r[1] == device_index and r[2] == 0x00:
+                            if r[4] != 0:
+                                feat_idx = r[4]
+                                break
+                    time.sleep(0.01)
+                
+                if feat_idx:
+                    # 直接读取 Function 1 (GetBatteryLevelStatus，获取精确电量百分比和充放电状态)
+                    read_cmd_f1 = [HIDPP_LONG_MSG, device_index, feat_idx, 0x1A] + [0] * 16
+                    dev.write(bytes(read_cmd_f1))
+                    
+                    start = time.monotonic()
+                    while (time.monotonic() - start) * 1000 < 500:
+                        resp = dev.read(64)
+                        if resp:
+                            r = bytes(resp)
+                            if len(r) >= 7 and r[1] == device_index and r[2] == feat_idx:
+                                info = BatteryInfo()
+                                info.percentage = r[4]
+                                status = r[6]
+                                info.charging = status in (1, 2, 3)
+                                info.status_text = "充电中" if info.charging else "放电中"
+                                logger.info(f"{self.product_string} UNIFIED_BATTERY(F1): {info.percentage}% 状态={status}")
+                                return info
+                        time.sleep(0.01)
+
+                # 如果没拿到 0x1004，尝试长报文查询 feature 0x1001 (电压)
+                query = [HIDPP_LONG_MSG, device_index, 0x00, 0x0A, 0x10, 0x01] + [0] * 14
+                dev.write(bytes(query))
+                
+                start = time.monotonic()
+                feat_idx = None
+                while (time.monotonic() - start) * 1000 < 500:
+                    resp = dev.read(64)
+                    if resp:
+                        r = bytes(resp)
+                        if len(r) >= 5 and r[1] == device_index and r[2] == 0x00:
+                            if r[4] != 0:
+                                feat_idx = r[4]
+                                break
+                    time.sleep(0.01)
+                
+                if feat_idx:
+                    # 用长报文读取电压
+                    read_cmd = [HIDPP_LONG_MSG, device_index, feat_idx, 0x0A] + [0] * 16
+                    dev.write(bytes(read_cmd))
+                    
+                    start = time.monotonic()
+                    while (time.monotonic() - start) * 1000 < 500:
+                        resp = dev.read(64)
+                        if resp:
+                            r = bytes(resp)
+                            if len(r) >= 7 and r[1] == device_index and r[2] == feat_idx:
+                                voltage = (r[4] << 8) | r[5]
+                                flags = r[6]
+                                info = BatteryInfo()
+                                info.charging = (flags & 0x80) != 0
+                                info.percentage = self._voltage_to_percent(voltage)
+                                info.status_text = "充电中" if info.charging else "放电中"
+                                logger.info(f"{self.product_string} BATTERY_VOLTAGE: {voltage}mV -> {info.percentage}%")
+                                return info
+                        time.sleep(0.01)
+                
+                # 最后尝试 0x1000 (状态)
+                query = [HIDPP_LONG_MSG, device_index, 0x00, 0x0A, 0x10, 0x00] + [0] * 14
+                dev.write(bytes(query))
+                
+                start = time.monotonic()
+                feat_idx = None
+                while (time.monotonic() - start) * 1000 < 500:
+                    resp = dev.read(64)
+                    if resp:
+                        r = bytes(resp)
+                        if len(r) >= 5 and r[1] == device_index and r[2] == 0x00:
+                            if r[4] != 0:
+                                feat_idx = r[4]
+                                break
+                    time.sleep(0.01)
+                
+                if feat_idx:
+                    # 读取 0x1000
+                    read_cmd = [HIDPP_LONG_MSG, device_index, feat_idx, 0x0A] + [0] * 16
+                    dev.write(bytes(read_cmd))
+                    
+                    start = time.monotonic()
+                    while (time.monotonic() - start) * 1000 < 500:
+                        resp = dev.read(64)
+                        if resp:
+                            r = bytes(resp)
+                            if len(r) >= 7 and r[1] == device_index and r[2] == feat_idx:
+                                info = BatteryInfo()
+                                info.percentage = r[4]
+                                status = r[6]
+                                info.charging = status in (1, 2, 3, 4)
+                                info.status_text = "充电中" if info.charging else "放电中"
+                                logger.info(f"{self.product_string} BATTERY_STATUS: {info.percentage}%")
+                                return info
+                        time.sleep(0.01)
+
+                logger.debug(f"{self.product_string}: 所有已知电量读取尝试均失败或超时")
+                return None
+            finally:
+                dev.close()
+        except Exception as e:
+            logger.warning(f"{self.product_string} 电池读取发生异常: {e}")
+            return None
+
 
 def find_logitech_receivers() -> list[dict]:
     """
@@ -383,8 +585,19 @@ def find_logitech_receivers() -> list[dict]:
         if existing is None:
             filtered[key] = dev
         else:
-            # 优先使用 vendor-defined usage page
-            if dev.get('usage_page', 0) == 0xFF00:
-                filtered[key] = dev
+            # 优先选 usage_page=0xFF00 且 usage=1 的短消息通道
+            # 因为 get_battery() 发的是短报文 (0x10)
+            dev_page = dev.get('usage_page', 0)
+            dev_usage = dev.get('usage', 0)
+            exist_page = existing.get('usage_page', 0)
+            exist_usage = existing.get('usage', 0)
+            
+            if dev_page == 0xFF00:
+                if exist_page != 0xFF00:
+                    # 新的是 0xFF00，旧的不是，替换
+                    filtered[key] = dev
+                elif dev_usage == 0x0001 and exist_usage != 0x0001:
+                    # 新的是 usage=1 (短消息)，旧的不是，替换
+                    filtered[key] = dev
 
     return list(filtered.values())
