@@ -151,16 +151,38 @@ class LogitechReceiver:
                 response = self._device.read(64)
                 if response:
                     resp = bytes(response)
-                    # 检查是否是我们期望的响应（匹配 device_index 和 feature_index）
-                    if len(resp) >= 4:
-                        # 错误响应: report_id=0x10或0x11, 且 byte 2 == 0x8F
-                        if resp[2] == 0x8F:
+                    # 仅接受与本次请求严格匹配的 HID++ 响应帧，忽略其它输入事件/异步帧
+                    if len(resp) < 4:
+                        time.sleep(0.01)
+                        continue
+
+                    # 仅接受 HID++ 短/长报文
+                    if resp[0] not in (HIDPP_SHORT_MSG, HIDPP_LONG_MSG):
+                        continue
+
+                    # 必须是同一个 device_index
+                    if resp[1] != data[1]:
+                        continue
+
+                    req_sw_id = data[3] & 0x0F
+
+                    # 错误响应: feature byte=0x8F，且 SW-ID 匹配当前请求
+                    if resp[2] == 0x8F:
+                        if (resp[3] & 0x0F) == req_sw_id:
                             logger.debug(f"HID++ 错误响应: {resp.hex()}")
                             return None
-                        # 匹配 device_index 还要匹配 feature_index 甚至 function 所在的 byte 3
-                        if resp[1] == data[1] and len(resp) >= len(data):
-                            if resp[2] == data[2] and (resp[3] & 0xF0) == (data[3] & 0xF0):
-                                return resp
+                        continue
+
+                    # 必须匹配 feature_index、function 高 4 位、SW-ID 低 4 位
+                    if resp[2] != data[2]:
+                        continue
+                    if (resp[3] & 0xF0) != (data[3] & 0xF0):
+                        continue
+                    if (resp[3] & 0x0F) != req_sw_id:
+                        continue
+
+                    if len(resp) >= len(data):
+                        return resp
                 time.sleep(0.01)
 
             logger.debug("HID++ 响应超时")
@@ -168,6 +190,11 @@ class LogitechReceiver:
         except Exception as e:
             logger.error(f"HID++ 通信错误: {e}")
             return None
+
+    @staticmethod
+    def _is_valid_percentage(value: int) -> bool:
+        """校验电量百分比是否在有效范围内。"""
+        return 0 <= value <= 100
 
     def get_feature_index(self, device_index: int, feature_id: int) -> Optional[int]:
         """
@@ -211,6 +238,13 @@ class LogitechReceiver:
             level = response[5]  # 1=critical, 2=low, 4=good, 8=full
             charging = response[6]
 
+            if not self._is_valid_percentage(percentage):
+                logger.debug(f"忽略异常 UNIFIED_BATTERY 百分比: {percentage}, raw={response.hex()}")
+                return None
+            if level & 0xF0:
+                logger.debug(f"忽略异常 UNIFIED_BATTERY level: 0x{level:02X}, raw={response.hex()}")
+                return None
+
             info = BatteryInfo()
             info.percentage = percentage
             info.charging = charging != 0
@@ -248,6 +282,13 @@ class LogitechReceiver:
             next_percentage = response[5]
             status = response[6]
 
+            if not self._is_valid_percentage(percentage):
+                logger.debug(f"忽略异常 BATTERY_STATUS 百分比: {percentage}, raw={response.hex()}")
+                return None
+            if status not in (0, 1, 2, 3, 4, 5, 6):
+                logger.debug(f"忽略异常 BATTERY_STATUS 状态: {status}, raw={response.hex()}")
+                return None
+
             info = BatteryInfo()
             info.percentage = percentage
 
@@ -282,6 +323,11 @@ class LogitechReceiver:
         if response and len(response) >= 7:
             voltage = (response[4] << 8) | response[5]
             flags = response[6]
+
+            # Li-ion 鼠标电池电压通常在 3000~5000mV，超出判定为噪声帧
+            if voltage < 3000 or voltage > 5000:
+                logger.debug(f"忽略异常 BATTERY_VOLTAGE 电压: {voltage}mV, raw={response.hex()}")
+                return None
 
             info = BatteryInfo()
             info.charging = (flags & 0x80) != 0
@@ -429,7 +475,7 @@ class LogitechReceiver:
                     resp = dev.read(64)
                     if resp:
                         r = bytes(resp)
-                        if len(r) >= 5 and r[1] == device_index and r[2] == 0x00:
+                        if len(r) >= 5 and r[0] in (HIDPP_SHORT_MSG, HIDPP_LONG_MSG) and r[1] == device_index and r[2] == 0x00 and (r[3] & 0x0F) == 0x0A:
                             if r[4] != 0:
                                 feat_idx = r[4]
                                 break
@@ -445,10 +491,15 @@ class LogitechReceiver:
                         resp = dev.read(64)
                         if resp:
                             r = bytes(resp)
-                            if len(r) >= 7 and r[1] == device_index and r[2] == feat_idx:
+                            if (len(r) >= 7 and r[0] in (HIDPP_SHORT_MSG, HIDPP_LONG_MSG)
+                                    and r[1] == device_index and r[2] == feat_idx
+                                    and (r[3] & 0xF0) == 0x10 and (r[3] & 0x0F) == 0x0A):
                                 info = BatteryInfo()
                                 info.percentage = r[4]
                                 status = r[6]
+                                if not self._is_valid_percentage(info.percentage) or status not in (0, 1, 2, 3, 4, 5, 6):
+                                    logger.debug(f"忽略异常 UNIFIED_BATTERY(F1) 响应: {r.hex()}")
+                                    continue
                                 info.charging = status in (1, 2, 3)
                                 info.status_text = "充电中" if info.charging else "放电中"
                                 logger.info(f"{self.product_string} UNIFIED_BATTERY(F1): {info.percentage}% 状态={status}")
@@ -465,7 +516,7 @@ class LogitechReceiver:
                     resp = dev.read(64)
                     if resp:
                         r = bytes(resp)
-                        if len(r) >= 5 and r[1] == device_index and r[2] == 0x00:
+                        if len(r) >= 5 and r[0] in (HIDPP_SHORT_MSG, HIDPP_LONG_MSG) and r[1] == device_index and r[2] == 0x00 and (r[3] & 0x0F) == 0x0A:
                             if r[4] != 0:
                                 feat_idx = r[4]
                                 break
@@ -481,9 +532,14 @@ class LogitechReceiver:
                         resp = dev.read(64)
                         if resp:
                             r = bytes(resp)
-                            if len(r) >= 7 and r[1] == device_index and r[2] == feat_idx:
+                            if (len(r) >= 7 and r[0] in (HIDPP_SHORT_MSG, HIDPP_LONG_MSG)
+                                    and r[1] == device_index and r[2] == feat_idx
+                                    and (r[3] & 0x0F) == 0x0A):
                                 voltage = (r[4] << 8) | r[5]
                                 flags = r[6]
+                                if voltage < 3000 or voltage > 5000:
+                                    logger.debug(f"忽略异常 BATTERY_VOLTAGE 响应: {r.hex()}")
+                                    continue
                                 info = BatteryInfo()
                                 info.charging = (flags & 0x80) != 0
                                 info.percentage = self._voltage_to_percent(voltage)
@@ -502,7 +558,7 @@ class LogitechReceiver:
                     resp = dev.read(64)
                     if resp:
                         r = bytes(resp)
-                        if len(r) >= 5 and r[1] == device_index and r[2] == 0x00:
+                        if len(r) >= 5 and r[0] in (HIDPP_SHORT_MSG, HIDPP_LONG_MSG) and r[1] == device_index and r[2] == 0x00 and (r[3] & 0x0F) == 0x0A:
                             if r[4] != 0:
                                 feat_idx = r[4]
                                 break
@@ -518,10 +574,15 @@ class LogitechReceiver:
                         resp = dev.read(64)
                         if resp:
                             r = bytes(resp)
-                            if len(r) >= 7 and r[1] == device_index and r[2] == feat_idx:
+                            if (len(r) >= 7 and r[0] in (HIDPP_SHORT_MSG, HIDPP_LONG_MSG)
+                                    and r[1] == device_index and r[2] == feat_idx
+                                    and (r[3] & 0x0F) == 0x0A):
                                 info = BatteryInfo()
                                 info.percentage = r[4]
                                 status = r[6]
+                                if not self._is_valid_percentage(info.percentage) or status not in (0, 1, 2, 3, 4, 5, 6):
+                                    logger.debug(f"忽略异常 BATTERY_STATUS 响应: {r.hex()}")
+                                    continue
                                 info.charging = status in (1, 2, 3, 4)
                                 info.status_text = "充电中" if info.charging else "放电中"
                                 logger.info(f"{self.product_string} BATTERY_STATUS: {info.percentage}%")

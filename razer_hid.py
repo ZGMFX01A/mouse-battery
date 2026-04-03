@@ -173,6 +173,31 @@ class RazerDevice:
                 pass
             self._device = None
 
+    @staticmethod
+    def _is_valid_response_for_request(response: bytes, request: bytes) -> bool:
+        """校验响应是否与请求命令严格匹配，避免误收非目标帧。"""
+        if len(response) < RAZER_REPORT_LEN or len(request) < RAZER_REPORT_LEN:
+            return False
+
+        # transaction_id / command_class / command_id / data_size 必须匹配
+        if response[1] != request[1]:
+            return False
+        if response[6] != request[6] or response[7] != request[7]:
+            return False
+        if response[5] != request[5]:
+            return False
+
+        # 只接受完整单包响应
+        if response[2] != 0x00 or response[3] != 0x00:
+            return False
+
+        # CRC 必须正确
+        expected_crc = _calculate_crc(response)
+        if response[88] != expected_crc:
+            return False
+
+        return True
+
     def _send_report(self, report: bytes, timeout_ms: int = 3000) -> Optional[bytes]:
         """
         发送报文并等待响应
@@ -202,7 +227,10 @@ class RazerDevice:
                         # 检查状态
                         status = resp[0]
                         if status == STATUS_SUCCESS:
-                            return resp
+                            if self._is_valid_response_for_request(resp, report):
+                                return resp
+                            logger.debug(f"忽略不匹配的 Razer 响应帧: {resp.hex()}")
+                            continue
                         elif status == STATUS_BUSY:
                             time.sleep(0.05)
                             continue
@@ -210,8 +238,8 @@ class RazerDevice:
                             logger.debug(f"Razer 命令失败, status=0x{status:02X}")
                             return None
                         else:
-                            # 可能还没处理完，继续读取
-                            return resp
+                            # 非成功状态但也不是明确失败，继续等待下一帧
+                            continue
                 except Exception:
                     pass
                 time.sleep(0.05)
@@ -241,6 +269,9 @@ class RazerDevice:
         if response and len(response) >= 10:
             # 电量在 arguments[1] 字节，值域 0-255
             raw_level = response[9]  # offset 8 + arguments[1]
+            if raw_level > 255:
+                logger.debug(f"忽略异常 Razer 电量原始值: {raw_level}, raw={response.hex()}")
+                return None
             level = round(raw_level * 100 / 255)
             level = max(0, min(100, level))  # 钳位到 0-100
             logger.info(f"Razer 电池电量: {level}% (原始值: 0x{raw_level:02X}={raw_level})")
@@ -262,6 +293,9 @@ class RazerDevice:
         response = self._send_report(report)
         if response and len(response) >= 10:
             charging = response[9]  # arguments[1]
+            if charging not in (0, 1):
+                logger.debug(f"忽略异常 Razer 充电状态值: {charging}, raw={response.hex()}")
+                return None
             is_charging = charging != 0
             logger.info(f"Razer 充电状态: {'充电中' if is_charging else '未充电'}")
             return is_charging

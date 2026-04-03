@@ -185,6 +185,11 @@ class DeviceManager:
                 with self._lock:
                     mouse = self._mice[idx]
                     if battery:
+                        if not self._is_battery_sample_valid(mouse, battery.percentage, battery.charging):
+                            mouse.status_text = "检测到异常帧，沿用上次有效电量"
+                            mouse.last_update = time.time()
+                            idx += 1
+                            continue
                         # 硬件层面：任何返回 0 的结果几乎肯定是设备未就绪/深度休眠
                         if battery.percentage <= 0:
                             mouse.percentage = -1
@@ -216,6 +221,11 @@ class DeviceManager:
                 with self._lock:
                     mouse = self._mice[idx]
                     if battery:
+                        if not self._is_battery_sample_valid(mouse, battery.percentage, battery.charging):
+                            mouse.status_text = "检测到异常帧，沿用上次有效电量"
+                            mouse.last_update = time.time()
+                            idx += 1
+                            continue
                         if battery.percentage <= 0:
                             mouse.percentage = -1
                             mouse.charging = False
@@ -227,8 +237,8 @@ class DeviceManager:
                             mouse.status_text = battery.status_text
                             mouse.online = True
                     else:
-                        mouse.status_text = "无法读取电量"
-                        mouse.online = False
+                        # 通信暂时失败时保留最后一次有效电量，避免误判离线导致电量闪烁
+                        mouse.status_text = "读取超时，沿用上次有效电量"
                     mouse.last_update = time.time()
             except Exception as e:
                 logger.error(f"刷新雷蛇设备电池失败: {e}")
@@ -236,6 +246,34 @@ class DeviceManager:
                     self._mice[idx].status_text = f"读取错误"
                     self._mice[idx].online = False
             idx += 1
+
+    @staticmethod
+    def _is_battery_sample_valid(mouse: MouseInfo, percentage: int, charging: bool) -> bool:
+        """校验电量样本合法性，过滤明显异常跳变。"""
+        if percentage < 0 or percentage > 100:
+            return False
+
+        # 没有历史值时，只做范围检查
+        if mouse.percentage < 0:
+            return True
+
+        delta = abs(percentage - mouse.percentage)
+
+        # 非充电状态下，单次跳变超过 40% 基本可判定为噪声帧
+        if not charging and delta > 40:
+            logger.warning(
+                f"过滤异常电量跳变: {mouse.name} {mouse.percentage}% -> {percentage}% (charging={charging})"
+            )
+            return False
+
+        # 充电状态下允许稍大波动，但超过 60% 仍视为异常
+        if charging and delta > 60:
+            logger.warning(
+                f"过滤异常充电跳变: {mouse.name} {mouse.percentage}% -> {percentage}% (charging={charging})"
+            )
+            return False
+
+        return True
 
     def start_auto_refresh(self, interval: int = 60):
         """启动自动刷新线程"""
