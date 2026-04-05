@@ -347,7 +347,12 @@ class MouseBatteryApp:
                     self.page.update()
                 
             def worker():
-                success = updater.download_and_install(url, progress)
+                host_pid = None
+                host_pid_env = os.environ.get('MOUSE_BATTERY_HOST_PID', '').strip()
+                if host_pid_env.isdigit():
+                    host_pid = int(host_pid_env)
+
+                success = updater.download_and_install(url, progress, host_pid=host_pid)
                 if not success:
                     status_txt.value = "更新失败或仍在调试环境中，请直接去 GitHub 下载"
                     dialog.actions[1].disabled = False # 允许关闭

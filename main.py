@@ -54,8 +54,13 @@ def open_settings_window():
     try:
         # 当打包成 exe 后，sys.executable 会变成当前的 exe 路径
         # 因此通过传入 --gui 参数，再次启动本程序，但进入 GUI 逻辑
-        p = subprocess.Popen([sys.executable, '--gui'],
-                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        env = os.environ.copy()
+        env['MOUSE_BATTERY_HOST_PID'] = str(os.getpid())
+        p = subprocess.Popen(
+            [sys.executable, '--gui'],
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            env=env
+        )
         _settings_processes.append(p)
     except Exception as e:
         logging.getLogger(__name__).error(f"设置窗口启动失败: {e}")
