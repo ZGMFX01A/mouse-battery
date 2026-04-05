@@ -17,6 +17,50 @@ from tray import TrayApp
 from config import ConfigManager
 
 
+ERROR_ALREADY_EXISTS = 183
+_instance_mutex_handle = None
+
+
+def acquire_single_instance(lock_name: str) -> bool:
+    """基于 Windows 命名互斥体实现单实例。"""
+    global _instance_mutex_handle
+    if os.name != 'nt':
+        return True
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.GetLastError.argtypes = []
+        kernel32.GetLastError.restype = ctypes.c_uint32
+
+        handle = kernel32.CreateMutexW(None, False, lock_name)
+        if not handle:
+            return True
+
+        _instance_mutex_handle = handle
+        err = kernel32.GetLastError()
+        if err == ERROR_ALREADY_EXISTS:
+            return False
+        return True
+    except Exception:
+        # 互斥锁异常时不阻塞主流程
+        return True
+
+
+@atexit.register
+def release_single_instance():
+    """进程退出时释放互斥体句柄。"""
+    global _instance_mutex_handle
+    if os.name != 'nt' or not _instance_mutex_handle:
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(_instance_mutex_handle))
+    except Exception:
+        pass
+    _instance_mutex_handle = None
+
+
 def setup_logging():
     """配置日志"""
     logging.basicConfig(
@@ -140,7 +184,14 @@ if __name__ == '__main__':
 
     # 如果带有 --gui 参数，则启动 Flet GUI 设置页面
     if len(sys.argv) > 1 and sys.argv[1] == '--gui':
+        if not acquire_single_instance("Global\\MouseBattery_GUI_SingleInstance"):
+            logger.info("设置窗口实例已存在，本次启动已忽略")
+            sys.exit(0)
         launch_gui_mode()
+        sys.exit(0)
+
+    if not acquire_single_instance("Global\\MouseBattery_Main_SingleInstance"):
+        logger.info("主程序实例已存在，本次启动已忽略")
         sys.exit(0)
 
     logger.info("=" * 50)
