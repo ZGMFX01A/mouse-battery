@@ -63,6 +63,7 @@ class BatteryInfo:
     percentage: int = 0
     charging: bool = False
     status_text: str = "未知"
+    source: str = "unknown"
 
 
 class LogitechReceiver:
@@ -248,6 +249,7 @@ class LogitechReceiver:
             info = BatteryInfo()
             info.percentage = percentage
             info.charging = charging != 0
+            info.source = "short:0x1004"
 
             if info.charging:
                 info.status_text = "充电中"
@@ -291,6 +293,7 @@ class LogitechReceiver:
 
             info = BatteryInfo()
             info.percentage = percentage
+            info.source = "short:0x1000"
 
             # status: 0=discharging, 1=recharging, 2=almost_full,
             #         3=charged, 4=slow_recharge, 5=invalid_battery,
@@ -299,7 +302,8 @@ class LogitechReceiver:
                 info.charging = True
                 info.status_text = "充电中"
             elif status == 3:
-                info.charging = True
+                # 收紧判定：已充满(3)不再视为“正在充电”
+                info.charging = False
                 info.status_text = "已充满"
             elif status == 0:
                 info.status_text = "放电中"
@@ -331,6 +335,7 @@ class LogitechReceiver:
 
             info = BatteryInfo()
             info.charging = (flags & 0x80) != 0
+            info.source = "short:0x1001"
 
             # 电压 -> 百分比转换
             info.percentage = self._voltage_to_percent(voltage)
@@ -482,6 +487,7 @@ class LogitechReceiver:
                     time.sleep(0.01)
                 
                 if feat_idx:
+                    logger.debug(f"{self.product_string} legacy_long 命中 UNIFIED_BATTERY(0x1004), feat_idx={feat_idx}")
                     # 直接读取 Function 1 (GetBatteryLevelStatus，获取精确电量百分比和充放电状态)
                     read_cmd_f1 = [HIDPP_LONG_MSG, device_index, feat_idx, 0x1A] + [0] * 16
                     dev.write(bytes(read_cmd_f1))
@@ -502,9 +508,15 @@ class LogitechReceiver:
                                     continue
                                 info.charging = status in (1, 2, 3)
                                 info.status_text = "充电中" if info.charging else "放电中"
-                                logger.info(f"{self.product_string} UNIFIED_BATTERY(F1): {info.percentage}% 状态={status}")
+                                info.source = "legacy_long:0x1004/F1"
+                                logger.info(
+                                    f"{self.product_string} UNIFIED_BATTERY(F1): {info.percentage}% 状态={status} "
+                                    f"source=legacy_long:0x1004/F1"
+                                )
                                 return info
                         time.sleep(0.01)
+                else:
+                    logger.warning(f"{self.product_string} legacy_long 未命中 0x1004，回退尝试 0x1001/0x1000")
 
                 # 如果没拿到 0x1004，尝试长报文查询 feature 0x1001 (电压)
                 query = [HIDPP_LONG_MSG, device_index, 0x00, 0x0A, 0x10, 0x01] + [0] * 14
@@ -523,6 +535,7 @@ class LogitechReceiver:
                     time.sleep(0.01)
                 
                 if feat_idx:
+                    logger.debug(f"{self.product_string} legacy_long 命中 BATTERY_VOLTAGE(0x1001), feat_idx={feat_idx}")
                     # 用长报文读取电压
                     read_cmd = [HIDPP_LONG_MSG, device_index, feat_idx, 0x0A] + [0] * 16
                     dev.write(bytes(read_cmd))
@@ -544,9 +557,15 @@ class LogitechReceiver:
                                 info.charging = (flags & 0x80) != 0
                                 info.percentage = self._voltage_to_percent(voltage)
                                 info.status_text = "充电中" if info.charging else "放电中"
-                                logger.info(f"{self.product_string} BATTERY_VOLTAGE: {voltage}mV -> {info.percentage}%")
+                                info.source = "legacy_long:0x1001"
+                                logger.info(
+                                    f"{self.product_string} BATTERY_VOLTAGE: {voltage}mV -> {info.percentage}% "
+                                    f"charging={info.charging} source=legacy_long:0x1001"
+                                )
                                 return info
                         time.sleep(0.01)
+                else:
+                    logger.warning(f"{self.product_string} legacy_long 未命中 0x1001，继续回退尝试 0x1000")
                 
                 # 最后尝试 0x1000 (状态)
                 query = [HIDPP_LONG_MSG, device_index, 0x00, 0x0A, 0x10, 0x00] + [0] * 14
@@ -565,6 +584,7 @@ class LogitechReceiver:
                     time.sleep(0.01)
                 
                 if feat_idx:
+                    logger.debug(f"{self.product_string} legacy_long 命中 BATTERY_STATUS(0x1000), feat_idx={feat_idx}")
                     # 读取 0x1000
                     read_cmd = [HIDPP_LONG_MSG, device_index, feat_idx, 0x0A] + [0] * 16
                     dev.write(bytes(read_cmd))
@@ -583,9 +603,17 @@ class LogitechReceiver:
                                 if not self._is_valid_percentage(info.percentage) or status not in (0, 1, 2, 3, 4, 5, 6):
                                     logger.debug(f"忽略异常 BATTERY_STATUS 响应: {r.hex()}")
                                     continue
-                                info.charging = status in (1, 2, 3, 4)
-                                info.status_text = "充电中" if info.charging else "放电中"
-                                logger.info(f"{self.product_string} BATTERY_STATUS: {info.percentage}%")
+                                # 收紧判定：status=3(已充满)不再视为“正在充电”
+                                info.charging = status in (1, 2, 4)
+                                if status == 3:
+                                    info.status_text = "已充满"
+                                else:
+                                    info.status_text = "充电中" if info.charging else "放电中"
+                                info.source = "legacy_long:0x1000"
+                                logger.info(
+                                    f"{self.product_string} BATTERY_STATUS: {info.percentage}% status={status} "
+                                    f"charging={info.charging} source=legacy_long:0x1000"
+                                )
                                 return info
                         time.sleep(0.01)
 

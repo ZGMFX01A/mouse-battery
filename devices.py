@@ -283,12 +283,53 @@ class DeviceManager:
                 # 按 PID 分支：G903 (0xC539) 和 G502X (0xC547) 走专用长报文路径，其他设备走原始短报文
                 if receiver.product_id in (0xC539, 0xC547):
                     battery = receiver.get_battery_legacy_long()
+                    sample_source = "legacy_long"
                 else:
                     battery = receiver.get_battery()
+                    sample_source = "standard"
 
                 with self._lock:
                     if battery:
+                        battery_source = getattr(battery, 'source', sample_source)
+                        prev_pct = mouse.percentage
+                        prev_chg = mouse.charging
+                        delta = abs(battery.percentage - prev_pct) if prev_pct >= 0 else -1
+                        logger.debug(
+                            f"电量样本[罗技] key={key} source={sample_source} "
+                            f"prev={prev_pct}%/{prev_chg} -> new={battery.percentage}%/{battery.charging} "
+                            f"delta={delta} status={battery.status_text} "
+                            f"pid=0x{receiver.product_id:04X} path={self._safe_path_text(receiver.path)}"
+                        )
+                        # 收紧基线更新策略：G502X 的 BATTERY_STATUS(0x1000) 作为低可信回退源，
+                        # 当已有历史值且跳变过大时，不更新基线，避免污染后续“沿用上次有效电量”。
+                        if (
+                            receiver.product_id == 0xC547
+                            and battery_source == "legacy_long:0x1000"
+                            and prev_pct >= 0
+                            and delta > 20
+                        ):
+                            logger.warning(
+                                f"低可信电量帧触发[罗技] key={key} source={battery_source} "
+                                f"prev={prev_pct}%/{prev_chg} -> new={battery.percentage}%/{battery.charging} "
+                                f"delta={delta} threshold=20 pid=0x{receiver.product_id:04X} "
+                                f"path={self._safe_path_text(receiver.path)}"
+                            )
+                            mouse.status_text = "检测到异常帧，沿用上次有效电量"
+                            mouse.last_update = time.time()
+                            self._mark_failure(
+                                key,
+                                "低可信0x1000帧被过滤",
+                                f"pid=0x{receiver.product_id:04X} path={self._safe_path_text(receiver.path)}"
+                            )
+                            idx += 1
+                            continue
                         if not self._is_battery_sample_valid(mouse, battery.percentage, battery.charging):
+                            logger.warning(
+                                f"异常帧触发[罗技] key={key} source={sample_source} "
+                                f"prev={prev_pct}%/{prev_chg} -> new={battery.percentage}%/{battery.charging} "
+                                f"delta={delta} pid=0x{receiver.product_id:04X} "
+                                f"path={self._safe_path_text(receiver.path)}"
+                            )
                             mouse.status_text = "检测到异常帧，沿用上次有效电量"
                             mouse.last_update = time.time()
                             self._mark_failure(
@@ -356,7 +397,21 @@ class DeviceManager:
                 battery = device.get_battery()
                 with self._lock:
                     if battery:
+                        prev_pct = mouse.percentage
+                        prev_chg = mouse.charging
+                        delta = abs(battery.percentage - prev_pct) if prev_pct >= 0 else -1
+                        logger.debug(
+                            f"电量样本[雷蛇] key={key} prev={prev_pct}%/{prev_chg} "
+                            f"-> new={battery.percentage}%/{battery.charging} delta={delta} "
+                            f"status={battery.status_text} pid=0x{device.product_id:04X} "
+                            f"path={self._safe_path_text(device.path)}"
+                        )
                         if not self._is_battery_sample_valid(mouse, battery.percentage, battery.charging):
+                            logger.warning(
+                                f"异常帧触发[雷蛇] key={key} prev={prev_pct}%/{prev_chg} "
+                                f"-> new={battery.percentage}%/{battery.charging} delta={delta} "
+                                f"pid=0x{device.product_id:04X} path={self._safe_path_text(device.path)}"
+                            )
                             mouse.status_text = "检测到异常帧，沿用上次有效电量"
                             mouse.last_update = time.time()
                             self._mark_failure(
@@ -414,6 +469,9 @@ class DeviceManager:
     def _is_battery_sample_valid(mouse: MouseInfo, percentage: int, charging: bool) -> bool:
         """校验电量样本合法性，过滤明显异常跳变。"""
         if percentage < 0 or percentage > 100:
+            logger.warning(
+                f"过滤电量样本: 超出范围 {mouse.name} value={percentage} charging={charging}"
+            )
             return False
 
         # 没有历史值时，只做范围检查
@@ -425,14 +483,16 @@ class DeviceManager:
         # 非充电状态下，单次跳变超过 40% 基本可判定为噪声帧
         if not charging and delta > 40:
             logger.warning(
-                f"过滤异常电量跳变: {mouse.name} {mouse.percentage}% -> {percentage}% (charging={charging})"
+                f"过滤异常电量跳变: {mouse.name} {mouse.percentage}% -> {percentage}% "
+                f"delta={delta} threshold=40 charging={charging}"
             )
             return False
 
         # 充电状态下允许稍大波动，但超过 60% 仍视为异常
         if charging and delta > 60:
             logger.warning(
-                f"过滤异常充电跳变: {mouse.name} {mouse.percentage}% -> {percentage}% (charging={charging})"
+                f"过滤异常充电跳变: {mouse.name} {mouse.percentage}% -> {percentage}% "
+                f"delta={delta} threshold=60 charging={charging}"
             )
             return False
 
