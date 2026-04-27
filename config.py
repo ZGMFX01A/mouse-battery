@@ -55,6 +55,33 @@ class ConfigManager:
             "auto_update": False # 默认不自动更新
         }
         self.load()
+        self._refresh_autostart_path_if_needed()
+
+    def _refresh_autostart_path_if_needed(self):
+        """如果已启用开机自启，则在热更新后同步到当前 exe 路径。"""
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_READ)
+            value, _ = winreg.QueryValueEx(key, REG_NAME)
+            winreg.CloseKey(key)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            logger.error(f"读取启动项错误: {e}")
+            return
+
+        current_value = str(value).strip().strip('"')
+        current_norm = os.path.normcase(os.path.abspath(current_value))
+        app_norm = os.path.normcase(os.path.abspath(APP_PATH))
+        if current_norm == app_norm:
+            return
+
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, REG_NAME, 0, winreg.REG_SZ, APP_PATH)
+            winreg.CloseKey(key)
+            logger.info(f"已同步开机自启路径到新版本程序: {APP_PATH}")
+        except Exception as e:
+            logger.error(f"同步启动项路径失败: {e}")
 
     def load(self):
         """读取配置文件"""

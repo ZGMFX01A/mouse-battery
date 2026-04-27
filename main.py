@@ -7,18 +7,24 @@
 
 import sys
 import os
+import time
 import logging
+import _thread
 import ctypes
 import subprocess
 import atexit
+import threading
 
 from devices import DeviceManager
 from tray import TrayApp
 from config import ConfigManager
+import updater
 
 
 ERROR_ALREADY_EXISTS = 183
 _instance_mutex_handle = None
+_shutdown_for_update = False
+_shutdown_skip_gui_pid = None
 
 
 def acquire_single_instance(lock_name: str) -> bool:
@@ -84,6 +90,27 @@ def check_admin():
 _settings_processes = []
 
 
+def start_update_shutdown_watchdog(current_pid: int):
+    """监听热更新退出请求，尽量优雅关闭主进程。"""
+
+    def worker():
+        global _shutdown_for_update, _shutdown_skip_gui_pid
+        while True:
+            request = updater.consume_shutdown_request(current_pid)
+            if request:
+                _shutdown_for_update = request.get('reason') == 'update'
+                skip_gui_pid = request.get('skip_gui_pid')
+                _shutdown_skip_gui_pid = skip_gui_pid if isinstance(skip_gui_pid, int) and skip_gui_pid > 0 else None
+                logging.getLogger(__name__).info(
+                    f"收到热更新退出请求，准备优雅关闭主进程: skip_gui_pid={_shutdown_skip_gui_pid}"
+                )
+                _thread.interrupt_main()
+                return
+            time.sleep(0.5)
+
+    threading.Thread(target=worker, daemon=True, name="update-shutdown-watchdog").start()
+
+
 def open_settings_window():
     """用子进程打开 Flet 设置窗口（避免 signal 线程限制）"""
     global _settings_processes
@@ -117,6 +144,11 @@ def cleanup_settings_windows():
     for p in _settings_processes:
         if p.poll() is None:
             try:
+                if _shutdown_for_update and _shutdown_skip_gui_pid == p.pid:
+                    logging.getLogger(__name__).info(
+                        f"热更新退出时跳过强杀 GUI 子进程: pid={p.pid}"
+                    )
+                    continue
                 if os.name == 'nt':
                     subprocess.call(['taskkill', '/F', '/T', '/PID', str(p.pid)],
                                     creationflags=subprocess.CREATE_NO_WINDOW)
@@ -187,7 +219,10 @@ if __name__ == '__main__':
         if not acquire_single_instance("Global\\MouseBattery_GUI_SingleInstance"):
             logger.info("设置窗口实例已存在，本次启动已忽略")
             sys.exit(0)
-        launch_gui_mode()
+        try:
+            launch_gui_mode()
+        except KeyboardInterrupt:
+            logger.info("GUI 进程收到热更新退出信号，已开始优雅退出")
         sys.exit(0)
 
     if not acquire_single_instance("Global\\MouseBattery_Main_SingleInstance"):
@@ -211,4 +246,5 @@ if __name__ == '__main__':
         config_manager=config_manager,
         on_open_settings=open_settings_window,
     )
+    start_update_shutdown_watchdog(os.getpid())
     tray.start()
