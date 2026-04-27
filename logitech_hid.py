@@ -449,6 +449,10 @@ class LogitechReceiver:
         直接打开 usage=0x0002 的长消息通道，用长报文读取 0x1000, 0x1001, 0x1004 电压
         """
         try:
+            logger.debug(
+                f"{self.product_string} 开始 legacy_long 电量读取: pid=0x{self.product_id:04X} "
+                f"device_index=0x{device_index:02X}"
+            )
             # 枚举该接收器的所有端点，找到 usage=2 (长消息通道)
             all_devs = hid.enumerate(LOGITECH_VID, self.product_id)
             long_path = None
@@ -472,6 +476,9 @@ class LogitechReceiver:
                 
                 # 尝试长报文获取 0x1004 (统一电池) 
                 query = [HIDPP_LONG_MSG, device_index, 0x00, 0x0A, 0x10, 0x04] + [0] * 14
+                logger.debug(
+                    f"{self.product_string} legacy_long 尝试特性发现: feature=0x1004 query={bytes(query).hex()}"
+                )
                 dev.write(bytes(query))
                 
                 start = time.monotonic()
@@ -490,6 +497,9 @@ class LogitechReceiver:
                     logger.debug(f"{self.product_string} legacy_long 命中 UNIFIED_BATTERY(0x1004), feat_idx={feat_idx}")
                     # 直接读取 Function 1 (GetBatteryLevelStatus，获取精确电量百分比和充放电状态)
                     read_cmd_f1 = [HIDPP_LONG_MSG, device_index, feat_idx, 0x1A] + [0] * 16
+                    logger.debug(
+                        f"{self.product_string} legacy_long 读取 UNIFIED_BATTERY(F1): cmd={bytes(read_cmd_f1).hex()}"
+                    )
                     dev.write(bytes(read_cmd_f1))
                     
                     start = time.monotonic()
@@ -515,11 +525,15 @@ class LogitechReceiver:
                                 )
                                 return info
                         time.sleep(0.01)
+                    logger.debug(f"{self.product_string} legacy_long 0x1004 已命中特性，但读取 F1 超时/无有效响应")
                 else:
                     logger.warning(f"{self.product_string} legacy_long 未命中 0x1004，回退尝试 0x1001/0x1000")
 
                 # 如果没拿到 0x1004，尝试长报文查询 feature 0x1001 (电压)
                 query = [HIDPP_LONG_MSG, device_index, 0x00, 0x0A, 0x10, 0x01] + [0] * 14
+                logger.debug(
+                    f"{self.product_string} legacy_long 尝试特性发现: feature=0x1001 query={bytes(query).hex()}"
+                )
                 dev.write(bytes(query))
                 
                 start = time.monotonic()
@@ -538,6 +552,9 @@ class LogitechReceiver:
                     logger.debug(f"{self.product_string} legacy_long 命中 BATTERY_VOLTAGE(0x1001), feat_idx={feat_idx}")
                     # 用长报文读取电压
                     read_cmd = [HIDPP_LONG_MSG, device_index, feat_idx, 0x0A] + [0] * 16
+                    logger.debug(
+                        f"{self.product_string} legacy_long 读取 BATTERY_VOLTAGE: cmd={bytes(read_cmd).hex()}"
+                    )
                     dev.write(bytes(read_cmd))
                     
                     start = time.monotonic()
@@ -564,11 +581,15 @@ class LogitechReceiver:
                                 )
                                 return info
                         time.sleep(0.01)
+                    logger.debug(f"{self.product_string} legacy_long 0x1001 已命中特性，但读取电压超时/无有效响应")
                 else:
                     logger.warning(f"{self.product_string} legacy_long 未命中 0x1001，继续回退尝试 0x1000")
                 
                 # 最后尝试 0x1000 (状态)
                 query = [HIDPP_LONG_MSG, device_index, 0x00, 0x0A, 0x10, 0x00] + [0] * 14
+                logger.debug(
+                    f"{self.product_string} legacy_long 尝试特性发现: feature=0x1000 query={bytes(query).hex()}"
+                )
                 dev.write(bytes(query))
                 
                 start = time.monotonic()
@@ -587,6 +608,9 @@ class LogitechReceiver:
                     logger.debug(f"{self.product_string} legacy_long 命中 BATTERY_STATUS(0x1000), feat_idx={feat_idx}")
                     # 读取 0x1000
                     read_cmd = [HIDPP_LONG_MSG, device_index, feat_idx, 0x0A] + [0] * 16
+                    logger.debug(
+                        f"{self.product_string} legacy_long 读取 BATTERY_STATUS: cmd={bytes(read_cmd).hex()}"
+                    )
                     dev.write(bytes(read_cmd))
                     
                     start = time.monotonic()
@@ -616,6 +640,7 @@ class LogitechReceiver:
                                 )
                                 return info
                         time.sleep(0.01)
+                    logger.debug(f"{self.product_string} legacy_long 0x1000 已命中特性，但读取状态超时/无有效响应")
 
                 logger.debug(f"{self.product_string}: 所有已知电量读取尝试均失败或超时")
                 return None

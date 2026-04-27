@@ -238,6 +238,32 @@ class DeviceManager:
     def _device_key(mouse: MouseInfo, idx: int) -> str:
         return f"{mouse.brand.value}|{mouse.name}|0x{mouse.product_id:04X}|{idx}"
 
+    @staticmethod
+    def _is_low_confidence_logitech_source(source: str) -> bool:
+        """判断罗技电量来源是否为休眠期容易漂移的低可信源。"""
+        return source in {
+            "legacy_long:0x1001",
+            "short:0x1001",
+            "legacy_long:0x1000",
+            "short:0x1000",
+        }
+
+    @classmethod
+    def _should_keep_last_logitech_battery(cls, mouse: MouseInfo, source: str,
+                                           percentage: int, charging: bool) -> bool:
+        """休眠期若收到低可信且大幅跳变的样本，则保留上次有效电量。"""
+        if mouse.percentage < 0:
+            return False
+
+        if not cls._is_low_confidence_logitech_source(source):
+            return False
+
+        if charging:
+            return False
+
+        delta = abs(percentage - mouse.percentage)
+        return delta >= 20
+
     def _mark_failure(self, key: str, reason: str, detail: str = ""):
         """记录连续失败次数并输出诊断日志。"""
         count = self._consecutive_failures.get(key, 0) + 1
@@ -300,29 +326,48 @@ class DeviceManager:
                             f"delta={delta} status={battery.status_text} "
                             f"pid=0x{receiver.product_id:04X} path={self._safe_path_text(receiver.path)}"
                         )
-                        # 收紧基线更新策略：G502X 的 BATTERY_STATUS(0x1000) 作为低可信回退源，
-                        # 当已有历史值且跳变过大时，不更新基线，避免污染后续“沿用上次有效电量”。
-                        if (
-                            receiver.product_id == 0xC547
-                            and battery_source == "legacy_long:0x1000"
-                            and prev_pct >= 0
-                            and delta > 20
+                        battery_source = getattr(battery, 'source', sample_source)
+                        if self._should_keep_last_logitech_battery(
+                            mouse,
+                            battery_source,
+                            battery.percentage,
+                            battery.charging,
                         ):
                             logger.warning(
-                                f"低可信电量帧触发[罗技] key={key} source={battery_source} "
+                                f"休眠期低可信电量帧已忽略[罗技] key={key} source={battery_source} "
                                 f"prev={prev_pct}%/{prev_chg} -> new={battery.percentage}%/{battery.charging} "
-                                f"delta={delta} threshold=20 pid=0x{receiver.product_id:04X} "
+                                f"delta={delta} pid=0x{receiver.product_id:04X} "
                                 f"path={self._safe_path_text(receiver.path)}"
                             )
-                            mouse.status_text = "检测到异常帧，沿用上次有效电量"
+                            mouse.status_text = "休眠中，沿用上次有效电量"
                             mouse.last_update = time.time()
                             self._mark_failure(
                                 key,
-                                "低可信0x1000帧被过滤",
-                                f"pid=0x{receiver.product_id:04X} path={self._safe_path_text(receiver.path)}"
+                                "休眠期低可信电量帧被忽略",
+                                f"source={battery_source} pid=0x{receiver.product_id:04X} "
+                                f"path={self._safe_path_text(receiver.path)}"
                             )
                             idx += 1
                             continue
+                        if (
+                            prev_pct >= 0
+                            and not battery.charging
+                            and self._is_low_confidence_logitech_source(battery_source)
+                            and delta >= 20
+                        ):
+                            logger.warning(
+                                f"检测到低可信电量源覆盖风险[罗技] key={key} source={battery_source} "
+                                f"prev={prev_pct}%/{prev_chg} -> new={battery.percentage}%/{battery.charging} "
+                                f"delta={delta} status={battery.status_text} pid=0x{receiver.product_id:04X} "
+                                f"path={self._safe_path_text(receiver.path)}"
+                            )
+                        if prev_pct >= 0 and delta >= 20:
+                            logger.info(
+                                f"大幅电量跳变诊断[罗技] key={key} prev={prev_pct}%/{prev_chg} "
+                                f"new={battery.percentage}%/{battery.charging} delta={delta} "
+                                f"accepted_by_threshold={delta <= 40 or battery.charging} source={battery_source} "
+                                f"status={battery.status_text} pid=0x{receiver.product_id:04X}"
+                            )
                         if not self._is_battery_sample_valid(mouse, battery.percentage, battery.charging):
                             logger.warning(
                                 f"异常帧触发[罗技] key={key} source={sample_source} "
@@ -479,6 +524,10 @@ class DeviceManager:
             return True
 
         delta = abs(percentage - mouse.percentage)
+        logger.debug(
+            f"电量样本校验: {mouse.name} prev={mouse.percentage}% -> new={percentage}% "
+            f"delta={delta} charging={charging} thresholds=(40,60)"
+        )
 
         # 非充电状态下，单次跳变超过 40% 基本可判定为噪声帧
         if not charging and delta > 40:
