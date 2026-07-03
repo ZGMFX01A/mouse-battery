@@ -47,7 +47,7 @@ class ConfigManager:
     def __init__(self):
         # 启动时先清理上次热更新可能遗留的旧版执行文件被占用导致的残留
         updater.clean_old_version()
-        
+
         # 默认配置
         self.config = {
             "low_battery_notify": 20, # 默认 20%
@@ -77,7 +77,7 @@ class ConfigManager:
     @property
     def low_battery_notify(self) -> int:
         return self.config.get("low_battery_notify", 20)
-        
+
     @low_battery_notify.setter
     def low_battery_notify(self, val: int):
         self.config["low_battery_notify"] = val
@@ -88,7 +88,7 @@ class ConfigManager:
     @property
     def auto_update(self) -> bool:
         return self.config.get("auto_update", False)
-        
+
     @auto_update.setter
     def auto_update(self, val: bool):
         self.config["auto_update"] = val
@@ -130,38 +130,49 @@ class ConfigManager:
         支持跌穿阈值后自动继续提醒：
         > 5% 时，每掉 5% 提醒一次
         <= 5% 时，每掉 1% 提醒一次
+
+        边界修复：
+        - current_pct <= 0 时直接返回（休眠或设备未就绪，不触发误报）
+        - last_notified 默认为 101，使首次跌穿阈值能正确触发
+        - 仅在电量真正下降时才更新计数，避免回升/持平重复刷新
         """
         threshold = self.low_battery_notify
         if threshold == 0 or current_pct <= 0:
-            return False # 0或负数表示永不通知、休眠或设备未就绪
+            # 阈值关闭或读到无效应量，永不通知
+            return False
 
         notified_levels = self.config.setdefault("notified_levels", {})
         last_notified = notified_levels.get(device_name, 101)
 
-        # 如果充电拉回到了安全水位，重置通知标记
-        if current_pct > threshold and last_notified <= threshold:
-            notified_levels[device_name] = current_pct
-            self.save()
+        # 电量回升到安全水位以上，重置通知标记，下次跌穿时重新提醒
+        if current_pct > threshold:
+            if last_notified <= threshold:
+                notified_levels[device_name] = current_pct
+                self.save()
             return False
 
-        if current_pct <= threshold:
-            # 首次跌穿阈值
-            if last_notified > threshold:
-                notified_levels[device_name] = current_pct
-                self.save()
-                return True
-            
-            # 已经跌穿过阈值，判断是否需要再次提醒
-            # 1. 小于等于 5% 时，每掉 1% 提醒一次
-            elif current_pct <= 5 and current_pct < last_notified:
-                notified_levels[device_name] = current_pct
-                self.save()
-                return True
-            
-            # 2. 大于 5% 时，每掉 5% 提醒一次
-            elif current_pct > 5 and (last_notified - current_pct) >= 5:
-                notified_levels[device_name] = current_pct
-                self.save()
-                return True
+        # current_pct <= threshold 的告警区
+        if last_notified > threshold:
+            # 首次跌穿阈值，立即提醒
+            notified_levels[device_name] = current_pct
+            self.save()
+            return True
+
+        # 已在告警区，仅当电量进一步下降到更小区间才再次提醒
+        if current_pct >= last_notified:
+            # 电量未下降（回升或持平），不重复告警
+            return False
+
+        if current_pct <= 5:
+            # 极低电量每掉 1% 提醒一次
+            notified_levels[device_name] = current_pct
+            self.save()
+            return True
+
+        # 普通低电量每掉 5% 提醒一次
+        if (last_notified - current_pct) >= 5:
+            notified_levels[device_name] = current_pct
+            self.save()
+            return True
 
         return False

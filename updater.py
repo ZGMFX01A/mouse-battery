@@ -64,18 +64,18 @@ def check_for_update(current_version: str) -> tuple[bool, str, str, str]:
         req = urllib.request.Request(API_URL, headers={'User-Agent': 'MouseBattery-Updater'})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode('utf-8'))
-            
+
             latest_version = data.get('tag_name', '')
             body = data.get('body', '')
             if not body:
                 body = "（此次发布未提供更新日志说明）"
-            
+
             assets = data.get('assets', [])
 
             selected = _pick_release_asset(assets, latest_version)
             download_url = selected.get('browser_download_url', '')
             selected_name = selected.get('name', '')
-                    
+
             if not download_url:
                 logger.error("Release 中未发现 .exe 产物")
                 return False, current_version, "", ""
@@ -83,18 +83,27 @@ def check_for_update(current_version: str) -> tuple[bool, str, str, str]:
             logger.info(
                 f"更新检查命中资源: tag={latest_version}, asset={selected_name or '<unknown>'}"
             )
-                
+
             current_tup = parse_version(current_version)
             latest_tup = parse_version(latest_version)
-            
+
             if latest_tup > current_tup:
                 return True, latest_version, download_url, body
-            
+
             return False, latest_version, "", ""
-            
+
     except Exception as e:
         logger.error(f"检查更新失败: {e}")
         return False, "", "", str(e)
+
+
+def _safe_remove(path: str) -> None:
+    """安全删除文件，忽略不存在或其他错误。"""
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
 
 
 def download_and_install(download_url: str, on_progress=None, host_pid: Optional[int] = None):
@@ -114,8 +123,9 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
         tempfile.gettempdir(),
         f"mouse_battery_swap_{os.getpid()}.cmd"
     )
+    # 优先由外部传入宿主主进程 PID（GUI 热更新场景），否则用自身 PID
     target_pid = host_pid if isinstance(host_pid, int) and host_pid > 0 else os.getpid()
-    
+
     try:
         # 1. 下载新文件到 .new（避免边运行边改名当前 exe 导致卡死）
         req = urllib.request.Request(download_url, headers={'User-Agent': 'MouseBattery-Updater'})
@@ -123,8 +133,8 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
             content_len = response.info().get('Content-Length', '0').strip()
             total_size = int(content_len) if content_len.isdigit() else 0
             downloaded = 0
-            chunk_size = 1024 * 16 # 16KB 缓冲
-            
+            chunk_size = 1024 * 16  # 16KB 缓冲
+
             with open(new_exe_path, 'wb') as f:
                 while True:
                     chunk = response.read(chunk_size)
@@ -135,31 +145,32 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
                     if on_progress and total_size > 0:
                         pct = int(downloaded / total_size * 100)
                         on_progress(pct, downloaded, total_size)
-        
+
         logger.info(f"新版本下载完成: {new_exe_path}")
 
         # 2. 通过外部脚本完成替换与拉起，避免当前进程内自改名引发冻结
+        #    路径全部加引号，避免含空格/中文路径出错；编码使用本地 OEM 兼容
         script_lines = [
             "@echo off",
             "setlocal enabledelayedexpansion",
             "set RETRY=0",
             ":retry",
             "if %RETRY% GEQ 80 goto fail",  # 最多约 20 秒
-            f"taskkill /F /T /PID {target_pid} >nul 2>nul",
-            f"if exist \"{old_exe_path}\" del /f /q \"{old_exe_path}\" >nul 2>nul",
-            f"if exist \"{exe_path}\" move /y \"{exe_path}\" \"{old_exe_path}\" >nul 2>nul",
-            f"move /y \"{new_exe_path}\" \"{exe_path}\" >nul 2>nul",
-            f"if exist \"{exe_path}\" goto run",
+            f'taskkill /F /T /PID {target_pid} >nul 2>nul',
+            f'if exist "{old_exe_path}" del /f /q "{old_exe_path}" >nul 2>nul',
+            f'if exist "{exe_path}" move /y "{exe_path}" "{old_exe_path}" >nul 2>nul',
+            f'move /y "{new_exe_path}" "{exe_path}" >nul 2>nul',
+            f'if exist "{exe_path}" goto run',
             "set /a RETRY=%RETRY%+1",
             "ping 127.0.0.1 -n 2 >nul",
             "goto retry",
             ":run",
-            f"start \"\" \"{exe_path}\"",
-            f"del /f /q \"{swap_script_path}\" >nul 2>nul",
+            f'start "" "{exe_path}"',
+            f'del /f /q "{swap_script_path}" >nul 2>nul',
             "exit /b 0",
             ":fail",
-            f"del /f /q \"{new_exe_path}\" >nul 2>nul",
-            f"del /f /q \"{swap_script_path}\" >nul 2>nul",
+            f'del /f /q "{new_exe_path}" >nul 2>nul',
+            f'del /f /q "{swap_script_path}" >nul 2>nul',
             "exit /b 1",
         ]
         with open(swap_script_path, 'w', encoding='utf-8', newline='\r\n') as f:
@@ -170,17 +181,14 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
 
-        # 3. 立即退出旧进程，让外部脚本接管替换
+        # 3. 调用 atexit 清理后再退出，让外部脚本接管替换
+        import atexit
+        atexit._run_exitfuncs()
         os._exit(0)
-                        
+
     except Exception as e:
         logger.error(f"应用更新失败: {e}")
-        # 失败清理：尽量移除半成品 .new
-        if os.path.exists(new_exe_path):
-            try:
-                os.remove(new_exe_path)
-            except Exception:
-                pass
+        _safe_remove(new_exe_path)
         return False
 
 def clean_old_version():

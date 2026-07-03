@@ -89,12 +89,12 @@ def open_settings_window():
     global _settings_processes
     # 清理已经退出的子进程句柄
     _settings_processes = [p for p in _settings_processes if p.poll() is None]
-    
+
     # 单窗口防护：如果已有活动的 GUI 子进程，不再重复打开
     if _settings_processes:
         logging.getLogger(__name__).info("设置窗口已打开，不重复创建")
         return
-    
+
     try:
         # 当打包成 exe 后，sys.executable 会变成当前的 exe 路径
         # 因此通过传入 --gui 参数，再次启动本程序，但进入 GUI 逻辑
@@ -130,17 +130,21 @@ def cleanup_settings_windows():
 def launch_gui_mode():
     """GUI 模式启动逻辑"""
     import flet as ft
+    import threading
+    import time
     from gui import MouseBatteryApp
-    
-    # 确定资源基准目录
+    from devices import SharedStateDeviceManager
+
+    # 确定资源基准目录（打包后用 _MEIPASS，源码用文件所在目录）
     if getattr(sys, 'frozen', False):
         base_dir = sys._MEIPASS
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-    
+
     def _set_window_icon(title: str):
         """通过 Windows API 强制设置窗口图标（Flet 自身不支持桌面窗口图标）"""
-        import time
+        if os.name != 'nt':
+            return
         user32 = ctypes.windll.user32
         ico_path = os.path.join(base_dir, 'app.ico')
         if not os.path.exists(ico_path):
@@ -150,29 +154,26 @@ def launch_gui_mode():
         hicon_small = user32.LoadImageW(None, ico_path, 1, 16, 16, 0x10)
         if not hicon_big:
             return
-        # 轮询等待窗口出现
-        import time
+        # 轮询等待窗口出现（最多 5 秒）
         for _ in range(10):
             hwnd = user32.FindWindowW(None, title)
             if hwnd:
-                user32.SendMessageW(hwnd, 0x80, 1, hicon_big)   # WM_SETICON, ICON_BIG
-                user32.SendMessageW(hwnd, 0x80, 0, hicon_small) # WM_SETICON, ICON_SMALL
+                user32.SendMessageW(hwnd, 0x80, 1, hicon_big)    # WM_SETICON, ICON_BIG
+                user32.SendMessageW(hwnd, 0x80, 0, hicon_small)  # WM_SETICON, ICON_SMALL
                 logging.info("窗口图标已通过 Windows API 设置")
                 return
             time.sleep(0.5)
-    
+
     def _flet_main(page: ft.Page):
         page.title = "鼠标电量监控"
         # 后台线程设置窗口图标
-        import threading
         threading.Thread(target=_set_window_icon, args=(page.title,), daemon=True).start()
-        
+
         # 使用只读的共享状态 DeviceManager，不打开任何 HID 设备
-        from devices import SharedStateDeviceManager
         dm = SharedStateDeviceManager()
         app = MouseBatteryApp(dm)
         app.build(page)
-        
+
     logging.info("启动 Flet 设置界面...")
     assets_path = os.path.join(base_dir, 'assets')
     ft.app(target=_flet_main, assets_dir=assets_path)

@@ -338,7 +338,7 @@ def find_razer_devices() -> list[dict]:
     雷蛇 dongle 有多达 12 个子接口，只有 MI_00 支持控制通信。
     """
     devices = []
-    seen_pids = set()
+    seen_interfaces = set()  # 按 PID+interface+path 去重，支持同型号多 dongle
 
     try:
         all_devices = hid.enumerate(RAZER_VID, 0)
@@ -356,7 +356,7 @@ def find_razer_devices() -> list[dict]:
             candidates[pid] = []
         candidates[pid].append(dev)
 
-    # 第二轮：为每个 PID 选取最佳接口
+    # 第二轮：为每个 PID 选取最佳接口（支持多个同 PID dongle）
     for pid, devs in candidates.items():
         chosen = None
 
@@ -379,7 +379,13 @@ def find_razer_devices() -> list[dict]:
         if not chosen:
             chosen = devs[0]
 
+        # 按 PID + interface + path 去重，确保同型号多 dongle 都能被识别
         iface = chosen.get('interface_number', -1)
+        dedup_key = (pid, iface, chosen.get('path', b''))
+        if dedup_key in seen_interfaces:
+            continue
+        seen_interfaces.add(dedup_key)
+
         usage_page = chosen.get('usage_page', 0)
         usage = chosen.get('usage', 0)
         logger.info(

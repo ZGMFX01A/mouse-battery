@@ -175,7 +175,7 @@ class TrayApp:
             time.sleep(0.5)
             self.device_manager.scan_and_refresh()
             self.device_manager.start_auto_refresh(60)
-            
+
             # 后台静默检查更新
             if self.config_manager.auto_update:
                 def auto_check():
@@ -202,12 +202,12 @@ class TrayApp:
             return
         self._stopping = True
         self._running = False
-        
+
         # 移除回调避免在停止时被调用
         self.device_manager.remove_on_update(self._update_icon)
-        
+
         self.device_manager.shutdown()
-        
+
         if self._tray:
             try:
                 self._tray.visible = False
@@ -231,25 +231,28 @@ class TrayApp:
             else:
                 low = min(valid_mice, key=lambda m: m.percentage)
                 self._tray.icon = create_battery_icon(low.percentage, low.charging)
-                
+
             lines = ["鼠标电量监控"]
             for m in mice:
                 p = f"{m.percentage}%" if m.percentage >= 0 else "N/A"
                 c = " ⚡" if m.charging else ""
                 lines.append(f"{m.name}: {p}{c}")
-                
-                # 判断是否需要低电量通知 (跌穿阈值 且 未充电)
-                if not m.charging and self.config_manager.should_notify(m.name, m.percentage):
-                    try:
-                        self._tray.notify(
-                            f"{m.name} 当前电量只有 {m.percentage}%，请及时充电！",
-                            title="鼠标电量告警"
-                        )
-                        logger.info(f"触发低电量弹窗: {m.name} {m.percentage}%")
-                    except Exception as e:
-                        logger.error(f"弹窗通知失败: {e}")
-                        
-            self._tray.title = "\n".join(lines)[:127]
+
+                # 仅在已读到有效电量、且未充电时才判断低电量通知。
+                # percentage<0 表示休眠/未就绪，不应触发告警避免误报。
+                if m.percentage >= 0 and not m.charging:
+                    if self.config_manager.should_notify(m.name, m.percentage):
+                        try:
+                            self._tray.notify(
+                                f"{m.name} 当前电量只有 {m.percentage}%，请及时充电！",
+                                title="鼠标电量告警"
+                            )
+                            logger.info(f"触发低电量弹窗: {m.name} {m.percentage}%")
+                        except Exception as e:
+                            logger.error(f"弹窗通知失败: {e}")
+
+            # Windows tooltip 上限约 128 字符，做安全截断避免乱码
+            self._tray.title = "\n".join(lines)[:120]
         self._tray.menu = self._build_menu()
 
     def _build_menu(self) -> Menu:

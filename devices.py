@@ -10,7 +10,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Callable
 from enum import Enum
 
@@ -49,12 +49,17 @@ class DeviceManager:
     设备管理器
 
     负责扫描设备、维护连接、定期刷新电池状态。
+    使用 _mouse_to_device 映射精确关联 MouseInfo 与底层 HID 对象，
+    替代原先按 idx 顺序匹配的脆弱做法。
     """
 
     def __init__(self):
         self._mice: list[MouseInfo] = []
         self._logitech_receivers: list[LogitechReceiver] = []
         self._razer_devices: list[RazerDevice] = []
+        # _mice[i] 对应的底层设备映射：(brand, device_obj)
+        # 刷新时通过遍历该映射读电，避免 idx 错位
+        self._mouse_to_device: list[tuple] = []
         self._lock = threading.Lock()
         self._io_lock = threading.Lock()  # 串行化 scan/refresh，避免并发读写 HID
         self._consecutive_failures: dict[str, int] = {}
@@ -185,6 +190,7 @@ class DeviceManager:
         """扫描所有已连接设备"""
         with self._lock:
             self._mice.clear()
+            self._mouse_to_device.clear()
         self._consecutive_failures.clear()
 
         # 扫描罗技接收器
@@ -203,6 +209,7 @@ class DeviceManager:
                 )
                 with self._lock:
                     self._mice.append(mouse)
+                    self._mouse_to_device.append((Brand.LOGITECH, receiver))
 
                 logger.info(f"已添加罗技设备: {mouse.name}")
 
@@ -221,6 +228,7 @@ class DeviceManager:
                 )
                 with self._lock:
                     self._mice.append(mouse)
+                    self._mouse_to_device.append((Brand.RAZER, device))
 
                 logger.info(f"已添加雷蛇设备: {mouse.name}")
 
@@ -267,148 +275,104 @@ class DeviceManager:
             )
 
     def _refresh_battery(self):
-        """刷新所有设备的电池状态"""
-        idx = 0
+        """
+        刷新所有设备的电池状态。
 
-        # 刷新罗技设备
-        for receiver in self._logitech_receivers:
-            if idx >= len(self._mice):
-                break
+        通过 _mouse_to_device 映射逐个读取，替代原先按 idx 顺序匹配的脆弱逻辑。
+        罗技/雷蛇的公共处理逻辑统一收口，仅在获取 BatteryInfo 实现上分叉。
+        """
+        # 在锁内复制一份映射快照，避免刷新过程中列表被其他线程修改
+        with self._lock:
+            snapshot = list(zip(self._mice, self._mouse_to_device))
+
+        for idx, (mouse, (brand, device_obj)) in enumerate(snapshot):
             try:
                 with self._lock:
-                    mouse = self._mice[idx]
-                    key = self._device_key(mouse, idx)
                     prev_online = mouse.online
 
-                # 按 PID 分支：G903 (0xC539) 和 G502X (0xC547) 走专用长报文路径，其他设备走原始短报文
-                if receiver.product_id in (0xC539, 0xC547):
-                    battery = receiver.get_battery_legacy_long()
+                # 按品牌分叉获取 BatteryInfo
+                if brand == Brand.LOGITECH:
+                    battery = self._get_logitech_battery_safe(device_obj)
                 else:
-                    battery = receiver.get_battery()
+                    battery = self._get_razer_battery_safe(device_obj)
 
-                with self._lock:
-                    if battery:
-                        if not self._is_battery_sample_valid(mouse, battery.percentage, battery.charging):
+                # 统一处理结果更新
+                if battery:
+                    if not self._is_battery_sample_valid(mouse, battery.percentage, battery.charging):
+                        with self._lock:
                             mouse.status_text = "检测到异常帧，沿用上次有效电量"
                             mouse.last_update = time.time()
-                            self._mark_failure(
-                                key,
-                                "异常帧被过滤",
-                                f"pid=0x{receiver.product_id:04X} path={self._safe_path_text(receiver.path)}"
-                            )
-                            idx += 1
-                            continue
+                        self._mark_failure(
+                            self._device_key(mouse, idx),
+                            "异常帧被过滤",
+                            f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)}"
+                        )
+                        continue
+
+                    if battery.percentage <= 0:
                         # 硬件层面：任何返回 0 的结果几乎肯定是设备未就绪/深度休眠
-                        if battery.percentage <= 0:
+                        with self._lock:
                             mouse.percentage = -1
                             mouse.charging = False
                             mouse.status_text = "休眠或连接中断"
                             mouse.online = False
-                            self._mark_failure(
-                                key,
-                                "返回电量<=0",
-                                f"pid=0x{receiver.product_id:04X} path={self._safe_path_text(receiver.path)}"
-                            )
-                        else:
-                            mouse.percentage = battery.percentage
-                            mouse.charging = battery.charging
-                            mouse.status_text = battery.status_text
-                            mouse.online = True
-                            self._mark_success(key, battery.percentage, battery.charging)
-                            if not prev_online:
-                                logger.info(
-                                    f"设备状态恢复在线: {key}, pid=0x{receiver.product_id:04X}, "
-                                    f"path={self._safe_path_text(receiver.path)}"
-                                )
-                    else:
-                        mouse.status_text = "休眠中"
-                        # 罗技接收器在就始终显示，不设 online=False
-                        self._mark_failure(
-                            key,
-                            "电量读取返回空",
-                            f"pid=0x{receiver.product_id:04X} path={self._safe_path_text(receiver.path)}"
-                        )
-                    mouse.last_update = time.time()
-            except Exception as e:
-                logger.error(f"刷新罗技设备电池失败: {e}")
-                with self._lock:
-                    mouse = self._mice[idx]
-                    key = self._device_key(mouse, idx)
-                    mouse.status_text = f"读取错误"
-                    mouse.online = False
-                    self._mark_failure(
-                        key,
-                        "抛出异常",
-                        f"pid=0x{receiver.product_id:04X} path={self._safe_path_text(receiver.path)} err={type(e).__name__}: {e}"
-                    )
-            idx += 1
-
-        # 刷新雷蛇设备
-        for device in self._razer_devices:
-            if idx >= len(self._mice):
-                break
-            try:
-                with self._lock:
-                    mouse = self._mice[idx]
-                    key = self._device_key(mouse, idx)
-                    prev_online = mouse.online
-
-                battery = device.get_battery()
-                with self._lock:
-                    if battery:
-                        if not self._is_battery_sample_valid(mouse, battery.percentage, battery.charging):
-                            mouse.status_text = "检测到异常帧，沿用上次有效电量"
                             mouse.last_update = time.time()
-                            self._mark_failure(
-                                key,
-                                "异常帧被过滤",
-                                f"pid=0x{device.product_id:04X} path={self._safe_path_text(device.path)}"
-                            )
-                            idx += 1
-                            continue
-                        if battery.percentage <= 0:
-                            mouse.percentage = -1
-                            mouse.charging = False
-                            mouse.status_text = "休眠或连接中断"
-                            mouse.online = False
-                            self._mark_failure(
-                                key,
-                                "返回电量<=0",
-                                f"pid=0x{device.product_id:04X} path={self._safe_path_text(device.path)}"
-                            )
-                        else:
+                        self._mark_failure(
+                            self._device_key(mouse, idx),
+                            "返回电量<=0",
+                            f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)}"
+                        )
+                    else:
+                        with self._lock:
                             mouse.percentage = battery.percentage
                             mouse.charging = battery.charging
                             mouse.status_text = battery.status_text
                             mouse.online = True
-                            self._mark_success(key, battery.percentage, battery.charging)
-                            if not prev_online:
-                                logger.info(
-                                    f"设备状态恢复在线: {key}, pid=0x{device.product_id:04X}, "
-                                    f"path={self._safe_path_text(device.path)}"
-                                )
-                    else:
-                        # 通信暂时失败时保留最后一次有效电量，避免误判离线导致电量闪烁
-                        mouse.status_text = "读取超时，沿用上次有效电量"
-                        self._mark_failure(
-                            key,
-                            "电量读取返回空",
-                            f"pid=0x{device.product_id:04X} path={self._safe_path_text(device.path)}"
-                        )
-                    mouse.last_update = time.time()
-            except Exception as e:
-                logger.error(f"刷新雷蛇设备电池失败: {e}")
-                with self._lock:
-                    mouse = self._mice[idx]
-                    key = self._device_key(mouse, idx)
-                    mouse.status_text = f"读取错误"
-                    mouse.online = False
+                            mouse.last_update = time.time()
+                        self._mark_success(self._device_key(mouse, idx), battery.percentage, battery.charging)
+                        if not prev_online:
+                            logger.info(
+                                f"设备状态恢复在线: {self._device_key(mouse, idx)}, "
+                                f"pid=0x{mouse.product_id:04X}"
+                            )
+                else:
+                    # 通信暂时失败时保留最后一次有效电量，避免误判离线导致电量闪烁
+                    with self._lock:
+                        if brand == Brand.LOGITECH:
+                            mouse.status_text = "休眠中"
+                        else:
+                            mouse.status_text = "读取超时，沿用上次有效电量"
+                        mouse.last_update = time.time()
                     self._mark_failure(
-                        key,
-                        "抛出异常",
-                        f"pid=0x{device.product_id:04X} path={self._safe_path_text(device.path)} err={type(e).__name__}: {e}"
+                        self._device_key(mouse, idx),
+                        "电量读取返回空",
+                        f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)}"
                     )
-            idx += 1
+            except Exception as e:
+                logger.error(f"刷新{brand.value}设备电池失败: {e}")
+                with self._lock:
+                    mouse.percentage = -1
+                    mouse.status_text = "读取错误"
+                    mouse.online = False
+                    mouse.last_update = time.time()
+                self._mark_failure(
+                    self._device_key(mouse, idx),
+                    "抛出异常",
+                    f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)} err={type(e).__name__}: {e}"
+                )
+
+    @staticmethod
+    def _get_logitech_battery_safe(receiver: LogitechReceiver) -> Optional[BatteryInfo]:
+        """安全获取罗技设备电量，按 PID 分支选用读取路径。"""
+        # G903 (0xC539) 和 G502X (0xC547) 走专用长报文路径，其他设备走原始短报文
+        if receiver.product_id in (0xC539, 0xC547):
+            return receiver.get_battery_legacy_long()
+        return receiver.get_battery()
+
+    @staticmethod
+    def _get_razer_battery_safe(device: RazerDevice) -> Optional[RazerBatteryInfo]:
+        """安全获取雷蛇设备电量。"""
+        return device.get_battery()
 
     @staticmethod
     def _is_battery_sample_valid(mouse: MouseInfo, percentage: int, charging: bool) -> bool:
@@ -475,6 +439,8 @@ class DeviceManager:
             device.close()
         self._logitech_receivers.clear()
         self._razer_devices.clear()
+        with self._lock:
+            self._mouse_to_device.clear()
 
     def shutdown(self):
         """关闭管理器"""

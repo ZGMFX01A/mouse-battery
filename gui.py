@@ -46,6 +46,7 @@ COLORS = {
 
 
 def get_battery_color(percentage: int, charging: bool) -> str:
+    """根据电量与充电状态返回对应颜色。"""
     if charging:
         return COLORS['charging']
     if percentage >= 80:
@@ -61,6 +62,7 @@ def get_battery_color(percentage: int, charging: bool) -> str:
 
 
 def get_brand_color(brand: Brand) -> str:
+    """根据品牌返回对应的强调色。"""
     if brand == Brand.LOGITECH:
         return COLORS['logitech_blue']
     return COLORS['razer_green']
@@ -71,12 +73,19 @@ def get_brand_color(brand: Brand) -> str:
 # ============================================================
 
 def build_battery_ring(percentage: int, charging: bool, size: int = 120) -> ft.Stack:
-    """用 ProgressRing + Stack 构建圆环电量指示器"""
-    pct = max(0, min(100, percentage)) if percentage >= 0 else 0
-    color = get_battery_color(pct, charging) if percentage >= 0 else COLORS['offline']
+    """
+    用 ProgressRing + Stack 构建圆环电量指示器。
+    支持离线/未知电态：电量环置灰，避免负值导致环越界。
+    """
+    if percentage < 0:
+        pct = 0
+        color = COLORS['offline']
+    else:
+        pct = max(0, min(100, percentage))
+        color = get_battery_color(pct, charging)
 
     ring = ft.ProgressRing(
-        value=pct / 100 if percentage >= 0 else 0,
+        value=pct / 100,
         width=size,
         height=size,
         stroke_width=8,
@@ -84,27 +93,28 @@ def build_battery_ring(percentage: int, charging: bool, size: int = 120) -> ft.S
         bgcolor=COLORS['bg_card_border'],
     )
 
-    charging_items = []
+    # 数字与百分号垂直堆叠，由外层 Column 居中（保持原版居中效果）
+    center_controls = [
+        ft.Text(
+            f"{pct}" if percentage >= 0 else "--",
+            size=28, weight=ft.FontWeight.BOLD,
+            color=color,
+            text_align=ft.TextAlign.CENTER,
+        ),
+        ft.Text(
+            "%" if percentage >= 0 else "",
+            size=11, color=COLORS['text_secondary'],
+            text_align=ft.TextAlign.CENTER,
+        ),
+    ]
     if charging:
-        charging_items.append(
+        center_controls.append(
             ft.Text("⚡", size=13, color=COLORS['charging'],
-                     text_align=ft.TextAlign.CENTER)
+                    text_align=ft.TextAlign.CENTER)
         )
 
     center_content = ft.Column(
-        controls=[
-            ft.Text(
-                f"{pct}" if percentage >= 0 else "--",
-                size=28, weight=ft.FontWeight.BOLD,
-                color=color,
-                text_align=ft.TextAlign.CENTER,
-            ),
-            ft.Text(
-                "%" if percentage >= 0 else "",
-                size=11, color=COLORS['text_secondary'],
-                text_align=ft.TextAlign.CENTER,
-            ),
-        ] + charging_items,
+        controls=center_controls,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         alignment=ft.MainAxisAlignment.CENTER,
         spacing=0,
@@ -200,6 +210,7 @@ def build_mouse_card(mouse: MouseInfo) -> ft.Container:
 
 
 def _on_card_hover(e: ft.ControlEvent):
+    """鼠标卡片悬停效果切换背景与边框。"""
     container = e.control
     if e.data == "true":
         container.bgcolor = COLORS['bg_card_hover']
@@ -215,6 +226,7 @@ def _on_card_hover(e: ft.ControlEvent):
 # ============================================================
 
 def build_empty_state() -> ft.Container:
+    """未发现设备时的空状态占位。"""
     return ft.Container(
         content=ft.Column(
             controls=[
@@ -267,85 +279,96 @@ class MouseBatteryApp:
     def _on_autoupdate_toggle(self, e):
         self.config_manager.auto_update = e.control.value
 
+    def _show_dialog(self, title: str, message: str, actions: list = None):
+        """统一的对话框构建与弹出，减少重复代码。返回对话框对象供外部控制。"""
+        def close_dlg(e):
+            dlg.open = False
+            self._safe_update()
+
+        if actions is None:
+            actions = [ft.TextButton("确定", on_click=close_dlg)]
+
+        dlg = ft.AlertDialog(
+            title=ft.Text(title),
+            content=ft.Text(message, size=13, selectable=True),
+            actions=actions,
+            actions_alignment=ft.MainAxisAlignment.END,
+            shape=ft.RoundedRectangleBorder(radius=10)
+        )
+        self.page.show_dialog(dlg)
+        return dlg
+
     def _on_check_update_click(self, e):
         btn = e.control
         btn.disabled = True
         btn.content = ft.Text("检查中...", size=13)
-        self.page.update()
-        
+        self._safe_update()
+
         done_event = threading.Event()
         result_holder = [None]  # (has_update, latest, url, body)
-        
+
         def check():
             result_holder[0] = updater.check_for_update(APP_VERSION)
             done_event.set()
-        
+
         def watchdog():
             threading.Thread(target=check, daemon=True).start()
             finished = done_event.wait(timeout=10)
-            
+
+            # 恢复按钮
             btn.content = ft.Text("检查", size=13)
             btn.disabled = False
-            self.page.update()
-            
+            self._safe_update()
+
             if not finished:
-                # 超时了
-                def close_dlg(e):
-                    dlg.open = False
-                    self.page.update()
-                dlg = ft.AlertDialog(
-                    title=ft.Text("网络超时"),
-                    content=ft.Text("检查更新超时，请检查网络连接后重试。", size=13),
-                    actions=[ft.TextButton("确定", on_click=close_dlg)],
-                    actions_alignment=ft.MainAxisAlignment.END,
-                    shape=ft.RoundedRectangleBorder(radius=10)
-                )
-                self.page.show_dialog(dlg)
+                # 网络超时
+                self._safe_show_helper(lambda: self._show_dialog(
+                    "网络超时", "检查更新超时，请检查网络连接后重试。"
+                ))
                 return
-            
+
             has_update, latest, url, body = result_holder[0]
-            
             if has_update:
-                self._show_update_dialog(latest, url, body)
+                self._safe_show_helper(lambda: self._show_update_dialog(latest, url, body))
             else:
-                # 区分是已是最新还是网络错误
+                # 区分已是最新 vs 网络错误
                 if latest:
                     msg = f"当前版本 {APP_VERSION} 已经是最新版！"
+                    title = "版本检查"
                 else:
                     msg = f"检查更新失败，请检查网络设置。\n错误信息: {body}"
-                    
-                def close_dlg(e):
-                    dlg.open = False
-                    self.page.update()
-                    
-                dlg = ft.AlertDialog(
-                    title=ft.Text("版本检查" if latest else "网络故障"),
-                    content=ft.Text(msg, size=13),
-                    actions=[ft.TextButton("确定", on_click=close_dlg)],
-                    actions_alignment=ft.MainAxisAlignment.END,
-                    shape=ft.RoundedRectangleBorder(radius=10)
-                )
-                self.page.show_dialog(dlg)
-                
+                    title = "网络故障"
+                self._safe_show_helper(lambda: self._show_dialog(title, msg))
+
         threading.Thread(target=watchdog, daemon=True).start()
+
+    def _safe_show_helper(self, builder):
+        """跨线程安全地执行 UI 构建并刷新页面。"""
+        if not self.page:
+            return
+        try:
+            builder()
+            self.page.update()
+        except Exception as e:
+            logger.error(f"UI 弹窗失败: {e}")
 
     def _show_update_dialog(self, version: str, url: str, body: str):
         pb = ft.ProgressBar(width=400, color=COLORS['accent_blue'], value=0)
         status_txt = ft.Text(f"准备升级到 {version}...", color=COLORS['text_dim'], size=12)
-        
+
         def do_update(e):
             dialog.actions[0].disabled = True
             dialog.actions[1].disabled = True
-            self.page.update()
-            
+            self._safe_update()
+
             last_pct = [-1]
             def progress(pct, dl, total):
                 if pct != last_pct[0]:
                     last_pct[0] = pct
                     pb.value = pct / 100.0
                     status_txt.value = f"正在下载... {pct}%"
-                    self.page.update()
-                
+                    self._safe_update()
+
             def worker():
                 host_pid = None
                 host_pid_env = os.environ.get('MOUSE_BATTERY_HOST_PID', '').strip()
@@ -355,13 +378,13 @@ class MouseBatteryApp:
                 success = updater.download_and_install(url, progress, host_pid=host_pid)
                 if not success:
                     status_txt.value = "更新失败或仍在调试环境中，请直接去 GitHub 下载"
-                    dialog.actions[1].disabled = False # 允许关闭
-                    self.page.update()
+                    dialog.actions[1].disabled = False  # 允许关闭
+                    self._safe_update()
             threading.Thread(target=worker, daemon=True).start()
 
         def close_dialog(e):
             dialog.open = False
-            self.page.update()
+            self._safe_update()
 
         dialog = ft.AlertDialog(
             title=ft.Text(f"发现新版本 {version}"),
@@ -370,12 +393,11 @@ class MouseBatteryApp:
                 ft.Container(
                     content=ft.Text(body, size=12, color=COLORS['text_dim'], selectable=True),
                     height=100,
-                    # 支持简单滚动
                 ),
                 ft.Container(height=5),
                 status_txt,
                 pb
-            ], tight=True),
+            ], tight=True, scroll=ft.ScrollMode.AUTO),
             actions=[
                 ft.TextButton("立即热更新", on_click=do_update),
                 ft.TextButton("稍后", on_click=close_dialog)
@@ -384,6 +406,7 @@ class MouseBatteryApp:
             shape=ft.RoundedRectangleBorder(radius=10)
         )
         self.page.show_dialog(dialog)
+        return dialog
 
     def _make_btn_content(self, icon_name, label: str) -> ft.Row:
         """创建按钮内部内容（icon + text）"""
@@ -406,9 +429,9 @@ class MouseBatteryApp:
         if os.path.exists(ico_path):
             page.window.icon = ico_path
         page.window.width = 520
-        page.window.height = 700
+        page.window.height = 720
         page.window.min_width = 460
-        page.window.min_height = 500
+        page.window.min_height = 520
         page.bgcolor = COLORS['bg_dark']
         page.padding = 0
         page.theme_mode = ft.ThemeMode.DARK
@@ -518,7 +541,7 @@ class MouseBatteryApp:
             padding=ft.padding.symmetric(horizontal=15, vertical=10),
         )
 
-        # ========= 偏好设置 ========= 
+        # ========= 偏好设置 =========
         settings_card = ft.Card(
             bgcolor=COLORS['bg_card'],
             elevation=2,
@@ -527,7 +550,7 @@ class MouseBatteryApp:
                 content=ft.Column([
                     ft.Text("⚙️ 个性化设置", size=18, weight=ft.FontWeight.W_600, color="white"),
                     ft.Divider(height=1, color=COLORS['bg_card_border']),
-                    
+
                     # 1. 开机自启
                     ft.ListTile(
                         leading=ft.Icon(ft.Icons.ROCKET_LAUNCH, color="#8888AA"),
@@ -539,7 +562,7 @@ class MouseBatteryApp:
                             on_change=self._on_autostart_toggle
                         )
                     ),
-                    
+
                     # 2. 低电量提醒
                     ft.ListTile(
                         leading=ft.Icon(ft.Icons.BATTERY_ALERT, color=COLORS['battery_low']),
@@ -618,8 +641,8 @@ class MouseBatteryApp:
         page.add(
             ft.Column(
                 controls=[
-                    header, 
-                    divider, 
+                    header,
+                    divider,
                     scrollable_content,
                     bottom_bar
                 ],
@@ -715,11 +738,20 @@ class MouseBatteryApp:
         self.config_manager.set_autostart(e.control.value)
 
     def _on_notify_change(self, e):
-        val = int(e.control.value)
+        """低电量提醒阈值变更，带边界保护防止非数字值。"""
+        try:
+            val = int(e.control.value)
+        except (ValueError, TypeError):
+            logger.warning(f"低电量阈值非法值: {e.control.value!r}")
+            return
+        if not 0 <= val <= 100:
+            logger.warning(f"低电量阈值越界: {val}，已忽略")
+            return
         self.config_manager.low_battery_notify = val
         logger.info(f"低电量提醒修改为: {val}%")
 
     def _safe_update(self):
+        """安全的页面刷新，捕捉跨线程导致的异常。"""
         try:
             if self.page:
                 self.page.update()
