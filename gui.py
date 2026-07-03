@@ -1,7 +1,10 @@
 """
 鼠标电量监控 - GUI 界面 (Flet 0.80+)
 
-基于 Flet (Flutter for Python) 的现代化界面，展示鼠标电池状态。
+浅色极简科技感界面：
+- 轻量 Windows 工具定位，不做电竞驱动风格
+- 白色卡片 + 低对比边框 + 单一绿色强调色
+- 电量展示改为大数字 + 横向进度条，减少圆环仪表盘带来的视觉噪音
 """
 
 import os
@@ -19,46 +22,55 @@ import updater
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 颜色主题 — Dark Mode (OLED) 设计系统
-# 深蓝近黑底 (slate-900/950) + 绿色正向指标 + 状态色阶梯
-# 参考: ui-ux-pro-max 推荐的 OLED Dark 方案（高对比、护眼、低功耗）
+# 颜色主题 — Light Minimal 设计系统
+# 目标：浅色、克制、工具感、科技感，不依赖深色和霓虹色制造氛围。
 # ============================================================
 
 COLORS = {
-    # —— 背景层（由浅到深）——
-    'bg_dark': '#020617',          # 窗口底色: slate-950 近黑
-    'bg_card': '#0F172A',          # 卡片底色: slate-900
-    'bg_card_hover': '#1E293B',    # 卡片悬浮: slate-800
-    'bg_card_border': '#334155',   # 卡片描边: slate-700
-    'bg_muted': '#1A1E2F',         # 次级表面: muted slate
-    'bg_input': '#1E293B',         # 输入/下拉框填充
+    # —— 背景 / 表面 ——
+    'bg_app': '#F6F8FB',           # 窗口底色：柔和浅灰
+    'bg_card': '#FFFFFF',          # 主卡片：纯白
+    'bg_card_soft': '#F9FAFB',     # 次级卡片 / 输入背景
+    'bg_card_hover': '#F3F6FA',    # 卡片悬停
+    'bg_line': '#E5E7EB',          # 分割线 / 边框
+    'bg_line_soft': '#EEF2F7',     # 更轻的分割线
+    'bg_input': '#FFFFFF',         # 下拉框 / 输入框
 
-    # —— 强调色（品牌主色与功能色）——
-    'accent_green': '#22C55E',     # 主强调/正向指标: green-500
-    'accent_blue': '#3B82F6',      # 次强调: blue-500
-    'accent_cyan': '#06B6D4',      # 信息/充电: cyan-500
+    # —— 主强调色 ——
+    'accent_green': '#22C55E',     # 电量 / 开关 / 主操作
+    'accent_green_dark': '#16A34A',
+    'accent_green_soft': '#EAFBF1',
 
-    # —— 文字层级 ——
-    'text_primary': '#F8FAFC',     # 主文字: slate-50（WCAG AAA 对比）
-    'text_secondary': '#94A3B8',   # 次文字: slate-400（>=4.5:1）
-    'text_dim': '#64748B',         # 弱化文字: slate-500（>=3:1）
+    # —— 文本层级 ——
+    'text_primary': '#111827',
+    'text_secondary': '#64748B',
+    'text_dim': '#94A3B8',
 
-    # —— 电量阶梯色（绿→黄→红）——
-    'battery_full': '#22C55E',     # >=80%: green-500
-    'battery_good': '#84CC16',     # >=60%: lime-500
-    'battery_mid': '#FACC15',      # >=35%: yellow-400
-    'battery_low': '#F97316',      # >=15%: orange-500
-    'battery_critical': '#EF4444', # <15%: red-500
-    'charging': '#06B6D4',         # 充电中: cyan-500
-    'offline': '#475569',          # 离线: slate-600
+    # —— 电量阶梯色 ——
+    'battery_full': '#22C55E',
+    'battery_good': '#65A30D',
+    'battery_mid': '#EAB308',
+    'battery_low': '#F97316',
+    'battery_critical': '#DC2626',
+    'charging': '#0EA5E9',
+    'offline': '#94A3B8',
 
-    # —— 语义色 / 破坏性操作 ——
-    'destructive': '#EF4444',
+    # —— 语义色 ——
+    'destructive': '#DC2626',
 
     # —— 品牌标识色 ——
-    'logitech_blue': '#00B8FC',    # 罗技官方蓝
-    'razer_green': '#44D62C',      # 雷蛇官方绿
+    'logitech_blue': '#2563EB',
+    'razer_green': '#16A34A',
 }
+
+
+# 右侧控件列宽统一常量：右侧只放轻量控件，不再放宽大的下拉框。
+TRAILING_WIDTH = 104
+
+
+def _alpha(hex_color: str, alpha_hex: str) -> str:
+    """给 6 位 HEX 颜色追加透明度，便于保持 Flet 颜色写法统一。"""
+    return hex_color + alpha_hex
 
 
 def get_battery_color(percentage: int, charging: bool) -> str:
@@ -73,95 +85,200 @@ def get_battery_color(percentage: int, charging: bool) -> str:
         return COLORS['battery_mid']
     elif percentage >= 15:
         return COLORS['battery_low']
-    else:
-        return COLORS['battery_critical']
+    return COLORS['battery_critical']
 
 
 def get_brand_color(brand: Brand) -> str:
-    """根据品牌返回对应的官方强调色。"""
+    """根据品牌返回对应的官方强调色；浅色界面里降低品牌色存在感。"""
     if brand == Brand.LOGITECH:
         return COLORS['logitech_blue']
     return COLORS['razer_green']
 
 
 # ============================================================
-# 圆环电量指示器
+# 通用 UI 小组件
 # ============================================================
 
-def build_battery_ring(percentage: int, charging: bool, size: int = 120) -> ft.Stack:
-    """
-    用 ProgressRing + Stack 构建圆环电量指示器。
-    支持离线/未知电态：电量环置灰，避免负值导致环越界。
-    """
+
+def build_icon_box(icon_name, color: str = None, size: int = 38) -> ft.Container:
+    """构建统一的浅绿色图标盒，避免每个设置项都出现高饱和大图标。"""
+    icon_color = color or COLORS['accent_green_dark']
+    return ft.Container(
+        content=ft.Icon(icon_name, size=20, color=icon_color),
+        width=size,
+        height=size,
+        border_radius=12,
+        bgcolor=_alpha(icon_color, '10'),
+        border=ft.Border.all(1, _alpha(icon_color, '1F')),
+        alignment=ft.Alignment.CENTER,
+    )
+
+
+def build_card(content, padding=None, margin=None) -> ft.Container:
+    """统一白色卡片样式：轻边框、轻阴影、较大圆角。"""
+    return ft.Container(
+        content=content,
+        bgcolor=COLORS['bg_card'],
+        border_radius=20,
+        border=ft.Border.all(1, COLORS['bg_line']),
+        padding=padding or ft.Padding.symmetric(horizontal=24, vertical=22),
+        margin=margin,
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=18,
+            color='#0000000A',
+            offset=ft.Offset(0, 6),
+        ),
+        animate=ft.Animation(180, ft.AnimationCurve.EASE_OUT),
+        on_hover=lambda e: _on_card_hover(e),
+    )
+
+
+def build_battery_bar(percentage: int, charging: bool, width: int = 132) -> ft.Column:
+    """横向电量条：电量数字在左侧区域内水平/垂直居中展示。"""
     if percentage < 0:
         pct = 0
         color = COLORS['offline']
+        value_text = '--'
     else:
         pct = max(0, min(100, percentage))
         color = get_battery_color(pct, charging)
+        value_text = f'{pct}%'
 
-    ring = ft.ProgressRing(
-        value=pct / 100,
-        width=size,
-        height=size,
-        stroke_width=8,
-        color=color,
-        bgcolor=COLORS['bg_card_border'],
-    )
-
-    # 数字与百分号垂直堆叠，由外层 Column 居中（保持居中效果）
-    center_controls = [
-        ft.Text(
-            f"{pct}" if percentage >= 0 else "--",
-            size=30, weight=ft.FontWeight.W_700,
-            color=color,
-            text_align=ft.TextAlign.CENTER,
-        ),
-        ft.Text(
-            "%" if percentage >= 0 else "",
-            size=11, color=COLORS['text_secondary'],
-            text_align=ft.TextAlign.CENTER,
-        ),
-    ]
-    if charging:
-        # 充电态叠加一个矢量闪电图标，避免依赖字体 emoji（跨平台一致性）
-        center_controls.append(
-            ft.Icon(ft.Icons.BOLT, size=16,
-                    color=COLORS['charging'])
-        )
-
-    center_content = ft.Column(
-        controls=center_controls,
-        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        alignment=ft.MainAxisAlignment.CENTER,
-        spacing=0,
-    )
-
-    return ft.Stack(
+    return ft.Column(
         controls=[
-            ring,
+            # 用单个 Text 展示百分比，避免数字和 % 在 Flet 布局中发生错位/丢失。
+            ft.Text(
+                value_text,
+                size=52,
+                weight=ft.FontWeight.W_700,
+                color=color,
+                text_align=ft.TextAlign.CENTER,
+            ),
             ft.Container(
-                content=center_content,
-                width=size,
-                height=size,
-                alignment=ft.Alignment(0, 0),
+                width=width,
+                content=ft.ProgressBar(
+                    value=pct / 100,
+                    height=8,
+                    color=color,
+                    bgcolor=COLORS['bg_line'],
+                    border_radius=8,
+                ),
             ),
         ],
-        width=size,
-        height=size,
+        spacing=12,
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        alignment=ft.MainAxisAlignment.CENTER,
     )
 
+def build_status_dot(color: str) -> ft.Container:
+    """状态圆点：比彩色大标签更轻。"""
+    return ft.Container(width=8, height=8, border_radius=4, bgcolor=color)
+
+
+def build_setting_row(icon_name, title: str, subtitle: str, trailing, icon_color: str = None) -> ft.Container:
+    """设置列表行：统一行高、统一左图标、右侧控件固定列宽并居中对齐。"""
+    return ft.Container(
+        padding=ft.Padding.symmetric(vertical=5),
+        content=ft.Row(
+            controls=[
+                build_icon_box(icon_name, color=icon_color),
+                ft.Column(
+                    controls=[
+                        ft.Text(title, size=15, weight=ft.FontWeight.W_600, color=COLORS['text_primary']),
+                        ft.Text(subtitle, size=12, color=COLORS['text_secondary']),
+                    ],
+                    spacing=3,
+                    expand=True,
+                ),
+                trailing,
+            ],
+            spacing=14,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+    )
+
+
+def build_trailing_box(content, width: int = TRAILING_WIDTH) -> ft.Container:
+    """设置项右侧统一占位：开关和数值控件共用固定列宽，右边缘稳定。"""
+    return ft.Container(
+        width=width,
+        content=content,
+        alignment=ft.Alignment.CENTER,
+    )
+
+
+def build_threshold_stepper(value: int, on_decrease=None, on_increase=None) -> ft.Container:
+    """
+    低电量阈值调节器。
+    用 - / 数值 / + 代替下拉框，避免下拉框在窄列里挤压文字，视觉上也更轻。
+    """
+    label = '关闭' if value <= 0 else f'{value}%'
+    return ft.Container(
+        width=TRAILING_WIDTH,
+        height=42,
+        bgcolor=COLORS['bg_card_soft'],
+        border=ft.Border.all(1, COLORS['bg_line']),
+        border_radius=12,
+        padding=ft.Padding.symmetric(horizontal=6, vertical=0),
+        content=ft.Row(
+            controls=[
+                ft.Container(
+                    content=ft.Icon(ft.Icons.REMOVE, size=14, color=COLORS['text_secondary']),
+                    width=26, height=30, border_radius=8,
+                    alignment=ft.Alignment.CENTER,
+                    on_click=on_decrease,
+                ),
+                ft.Container(
+                    content=ft.Text(label, size=13, weight=ft.FontWeight.W_600, color=COLORS['text_primary'], text_align=ft.TextAlign.CENTER),
+                    width=38,
+                    alignment=ft.Alignment.CENTER,
+                    expand=True,
+                ),
+                ft.Container(
+                    content=ft.Icon(ft.Icons.ADD, size=14, color=COLORS['text_secondary']),
+                    width=26, height=30, border_radius=8,
+                    alignment=ft.Alignment.CENTER,
+                    on_click=on_increase,
+                ),
+            ],
+            spacing=0,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+    )
+
+def build_action_button(content, primary: bool = False, on_click=None, expand: bool = True):
+    """底部动作按钮：统一白底圆角矩形，避免主按钮过度抢眼或变成胶囊形。"""
+    return ft.Container(
+        content=content,
+        expand=expand,
+        height=48,
+        bgcolor=COLORS['bg_card'],
+        border=ft.Border.all(1, COLORS['bg_line']),
+        border_radius=12,
+        alignment=ft.Alignment.CENTER,
+        padding=ft.Padding.symmetric(horizontal=14, vertical=0),
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=10,
+            color='#00000008',
+            offset=ft.Offset(0, 4),
+        ),
+        on_click=on_click,
+    )
 
 # ============================================================
 # 鼠标设备卡片
 # ============================================================
 
+
 def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.Container:
     """
-    构建鼠标设备信息卡片（Dark OLED 风格）。
-    - 品牌色左边框作为视觉强调，与电量色呼应
-    - 电量环居中，右侧为名称/状态/时间信息区
-    - 悬停切到更亮的次级表面，并用品牌色边框收边
+    构建鼠标设备信息卡片（浅色极简风格）。
+    - 取消大圆环和左侧品牌竖条，避免驱动面板/电竞感
+    - 左侧只保留大电量数字 + 横向进度条
+    - 右侧展示品牌、设备名、状态和更新时间
     """
     brand_color = get_brand_color(mouse.brand)
 
@@ -175,132 +292,128 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
     else:
         dot_color = COLORS['battery_critical']
 
-    # 更新时间（仅在有线时间才展示）
-    time_str = ""
+    time_str = '等待更新'
     if mouse.last_update > 0:
         time_str = f"更新于 {time.strftime('%H:%M:%S', time.localtime(mouse.last_update))}"
 
-    ring_widget = build_battery_ring(mouse.percentage, mouse.charging, size=110)
-
-    # 品牌标签徽章：圆角小药丸，复用品牌色
     brand_badge = ft.Container(
         content=ft.Text(
             mouse.brand.value,
-            size=11, weight=ft.FontWeight.W_600,
+            size=12,
+            weight=ft.FontWeight.W_600,
             color=brand_color,
         ),
-        padding=ft.Padding.symmetric(horizontal=8, vertical=3),
-        border_radius=10,
-        bgcolor=brand_color + "1F",  # 12% 透明品牌色填充
-        border=ft.Border.all(1, brand_color + "59"),  # 35% 透明色描边
+        padding=ft.Padding.symmetric(horizontal=12, vertical=5),
+        border_radius=14,
+        bgcolor=_alpha(brand_color, '10'),
+        border=ft.Border.all(1, _alpha(brand_color, '20')),
     )
 
-    right_info = ft.Column(
+    device_info = ft.Column(
         controls=[
             brand_badge,
             ft.Text(
                 mouse.name,
-                size=18, weight=ft.FontWeight.W_700,
+                size=22,
+                weight=ft.FontWeight.W_700,
                 color=COLORS['text_primary'],
                 max_lines=2,
                 overflow=ft.TextOverflow.ELLIPSIS,
             ),
             ft.Row(
                 controls=[
-                    # 状态点：小圆点闪烁呼吸感由 animate 提供
-                    ft.Container(width=8, height=8, border_radius=4, bgcolor=dot_color),
-                    ft.Text(mouse.status_text, size=13, color=COLORS['text_secondary']),
+                    build_status_dot(dot_color),
+                    ft.Text(mouse.status_text, size=14, color=COLORS['text_secondary']),
                 ],
-                spacing=6,
+                spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            ft.Text(time_str, size=11, color=COLORS['text_dim']),
+            ft.Text(time_str, size=13, color=COLORS['text_dim']),
         ],
-        spacing=6,
+        spacing=10,
         alignment=ft.MainAxisAlignment.CENTER,
+        expand=True,
     )
 
-    # 卡片主体：左边品牌色竖条 + 内容
-    card = ft.Container(
+    return build_card(
         content=ft.Row(
             controls=[
-                # 品牌色左侧竖条（视觉锚点，宽 4）
-                ft.Container(width=4, height=96, border_radius=2, bgcolor=brand_color),
+                # 当前行按 4:7 分配：电量约 36%，设备详情约 64%。
                 ft.Container(
-                    content=ring_widget,
-                    padding=ft.Padding.only(left=16, right=12, top=5, bottom=5),
+                    content=build_battery_bar(mouse.percentage, mouse.charging, width=132),
+                    expand=4,
+                    alignment=ft.Alignment.CENTER,
                 ),
-                ft.Container(content=right_info, expand=True,
-                             padding=ft.Padding.only(right=18)),
+                ft.Container(width=1, height=112, bgcolor=COLORS['bg_line_soft']),
+                ft.Container(
+                    content=device_info,
+                    expand=7,
+                    padding=ft.Padding.only(left=22),
+                    alignment=ft.Alignment.CENTER_LEFT,
+                ),
             ],
+            spacing=18,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=0,
         ),
-        bgcolor=COLORS['bg_card'],
-        border_radius=14,
-        border=ft.Border.all(1, COLORS['bg_card_border']),
-        padding=ft.Padding.symmetric(vertical=12),
-        # 悬停过渡：250ms ease-out，符合微交互 150-300ms 区间
-        animate=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
-        on_hover=lambda e: _on_card_hover(e),
+        padding=ft.Padding.symmetric(horizontal=26, vertical=18),
+        margin=ft.Margin.only(bottom=8),
     )
-    return card
 
 
 def _on_card_hover(e: ft.ControlEvent):
-    """鼠标卡片悬停效果：切换到更亮的次级表面并描品牌色边。"""
+    """卡片悬停效果：浅色界面只做非常轻的背景变化，不抢主要信息。"""
     container = e.control
-    if e.data == "true":
+    if e.data == 'true':
         container.bgcolor = COLORS['bg_card_hover']
-        container.border = ft.Border.all(1, COLORS['accent_blue'] + "66")
     else:
         container.bgcolor = COLORS['bg_card']
-        container.border = ft.Border.all(1, COLORS['bg_card_border'])
-    container.update()
+    try:
+        container.update()
+    except Exception:
+        pass
 
 
 # ============================================================
 # 空状态
 # ============================================================
 
+
 def build_empty_state() -> ft.Container:
-    """未发现设备时的空状态占位（柔和引导文案 + 圆角图标徽章）。"""
-    # 用一个带描边的圆角容器包裹图标，营造"空位卡"质感
+    """未发现设备时的空状态占位。"""
     icon_badge = ft.Container(
-        content=ft.Icon(ft.Icons.MOUSE_OUTLINED, size=48, color=COLORS['text_dim']),
-        width=88,
-        height=88,
-        border_radius=44,
-        bgcolor=COLORS['bg_muted'],
-        border=ft.Border.all(1, COLORS['bg_card_border']),
+        content=ft.Icon(ft.Icons.MOUSE_OUTLINED, size=42, color=COLORS['text_secondary']),
+        width=84,
+        height=84,
+        border_radius=24,
+        bgcolor=COLORS['bg_card_soft'],
+        border=ft.Border.all(1, COLORS['bg_line']),
         alignment=ft.Alignment.CENTER,
     )
-    return ft.Container(
+    return build_card(
         content=ft.Column(
             controls=[
                 icon_badge,
                 ft.Text(
-                    "未发现鼠标设备",
-                    size=20, weight=ft.FontWeight.W_700,
+                    '未发现鼠标设备',
+                    size=20,
+                    weight=ft.FontWeight.W_700,
                     color=COLORS['text_primary'],
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Container(height=6),
                 ft.Text(
-                    "请确保鼠标已开机且无线接收器已插入\n"
-                    "如 G Hub / Synapse 正在运行，请先退出\n"
-                    "可能需要以管理员身份运行本程序\n"
-                    "点击下方「扫描设备」按钮重试",
+                    '请确保鼠标已开机且无线接收器已插入\n'
+                    '如 G Hub / Synapse 正在运行，请先退出\n'
+                    '可能需要以管理员身份运行本程序',
                     size=13,
                     color=COLORS['text_secondary'],
                     text_align=ft.TextAlign.CENTER,
                 ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=10,
+            spacing=12,
         ),
-        padding=ft.Padding.symmetric(vertical=54, horizontal=30),
-        alignment=ft.Alignment.CENTER,
+        padding=ft.Padding.symmetric(vertical=46, horizontal=30),
+        margin=ft.Margin.only(bottom=8),
     )
 
 
@@ -308,8 +421,13 @@ def build_empty_state() -> ft.Container:
 # 主应用
 # ============================================================
 
+
 class MouseBatteryApp:
-    """鼠标电量监控主应用"""
+    """鼠标电量监控主应用。"""
+
+    # 低电量提醒允许的档位：关闭(0)、10%、20%、30%。
+    # -/+ 步进与 _set_notify_threshold 校验共用此常量，避免多处硬编码不一致。
+    _NOTIFY_ALLOWED_VALUES = (0, 10, 20, 30)
 
     def __init__(self, device_manager: DeviceManager):
         self.device_manager = device_manager
@@ -317,12 +435,22 @@ class MouseBatteryApp:
         self.device_manager.set_on_update(self._on_device_update)
         self.page: Optional[ft.Page] = None
         self.card_list: Optional[ft.Column] = None
-        self.scan_btn: Optional[ft.ElevatedButton] = None
+        self.scan_btn: Optional[ft.Container] = None
         self.scan_btn_row: Optional[ft.Row] = None
-        self.refresh_btn: Optional[ft.OutlinedButton] = None
+        self.refresh_btn: Optional[ft.Container] = None
         self.refresh_btn_row: Optional[ft.Row] = None
+        self.check_update_btn: Optional[ft.Container] = None
+        self.check_update_btn_row: Optional[ft.Row] = None
+        self.notify_threshold_control: Optional[ft.Container] = None
         self.status_text: Optional[ft.Text] = None
         self.auto_switch: Optional[ft.Switch] = None
+        # 动作按钮忙碌标记：Container.disabled 在 Flet 中无法拦截 on_click，
+        # 这里用显式锁替代，避免扫描/刷新/检查更新在执行中被重复点击触发并发。
+        self._scan_busy = False
+        self._refresh_busy = False
+        self._check_update_busy = False
+        # 禁用态下文字/图标统一用次级灰色，保证视觉与逻辑一致
+        self._disabled_color = COLORS['text_dim']
 
     def _on_autoupdate_toggle(self, e):
         self.config_manager.auto_update = e.control.value
@@ -334,59 +462,108 @@ class MouseBatteryApp:
             self._safe_update()
 
         if actions is None:
-            actions = [ft.TextButton("确定", on_click=close_dlg)]
+            actions = [ft.TextButton('确定', on_click=close_dlg)]
 
         dlg = ft.AlertDialog(
-            title=ft.Text(title),
-            content=ft.Text(message, size=13, selectable=True),
+            title=ft.Text(title, color=COLORS['text_primary']),
+            content=ft.Text(message, size=13, selectable=True, color=COLORS['text_secondary']),
             actions=actions,
             actions_alignment=ft.MainAxisAlignment.END,
-            shape=ft.RoundedRectangleBorder(radius=10)
+            shape=ft.RoundedRectangleBorder(radius=14),
         )
         self.page.show_dialog(dlg)
         return dlg
 
+    def _set_btn_disabled_visual(self, btn_row: Optional[ft.Row], disabled: bool, icon_default, label_default: str):
+        """统一处理按钮视觉禁用状态。
+
+        Container 没有 disabled 属性可拦截点击，因此用「置灰文字图标 + 忙碌锁」组合：
+        - disabled=True：图标文字改为次级灰，提示当前不可点击
+        - disabled=False：恢复为默认图标与标签、正常文字色
+        同时保持 _update_btn_content 兼容忙碌中的提示文案替换。
+        """
+        if not btn_row:
+            return
+        if disabled:
+            color = self._disabled_color
+            btn_row.controls[0] = ft.Icon(icon_default, size=18, color=color)
+            btn_row.controls[1] = ft.Text(label_default, size=14, weight=ft.FontWeight.W_500, color=color)
+        else:
+            color = COLORS['text_primary']
+            btn_row.controls[0] = ft.Icon(icon_default, size=18, color=color)
+            btn_row.controls[1] = ft.Text(label_default, size=14, weight=ft.FontWeight.W_500, color=color)
+
     def _on_check_update_click(self, e):
+        """检查版本更新。
+
+        通过显式忙碌锁 _check_update_busy 阻止重复点击（Container.disabled 在 Flet 中
+        无法拦截 on_click），并在 watchdog 外层加 try/except，保证即便后台线程异常
+        也能恢复按钮状态，避免按钮永久卡在「检查中...」。
+        """
+        if self._check_update_busy:
+            return
+        self._check_update_busy = True
+
         btn = e.control
-        btn.disabled = True
-        btn.content = ft.Text("检查中...", size=13)
+        original_content = getattr(btn, 'content', None)
+        btn.content = self._make_btn_content(ft.Icons.HOURGLASS_TOP, '检查中...', color=COLORS['text_primary'])
         self._safe_update()
 
         done_event = threading.Event()
         result_holder = [None]  # (has_update, latest, url, body)
 
         def check():
-            result_holder[0] = updater.check_for_update(APP_VERSION)
-            done_event.set()
+            try:
+                result_holder[0] = updater.check_for_update(APP_VERSION)
+            except Exception as ex:
+                # 兜底：网络异常由 check_for_update 内部捕获，这里防御未预期异常
+                logger.error(f'check_for_update 抛出异常: {ex}')
+                result_holder[0] = (False, '', '', str(ex))
+            finally:
+                done_event.set()
 
         def watchdog():
-            threading.Thread(target=check, daemon=True).start()
-            finished = done_event.wait(timeout=10)
+            try:
+                threading.Thread(target=check, daemon=True).start()
+                finished = done_event.wait(timeout=10)
 
-            # 恢复按钮
-            btn.content = ft.Text("检查", size=13)
-            btn.disabled = False
-            self._safe_update()
+                btn.content = original_content or self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, '检查更新', color=COLORS['text_primary'])
+                self._safe_update()
 
-            if not finished:
-                # 网络超时
-                self._safe_show_helper(lambda: self._show_dialog(
-                    "网络超时", "检查更新超时，请检查网络连接后重试。"
-                ))
-                return
+                if not finished:
+                    self._safe_show_helper(lambda: self._show_dialog(
+                        '网络超时', '检查更新超时，请检查网络连接后重试。'
+                    ))
+                    return
 
-            has_update, latest, url, body = result_holder[0]
-            if has_update:
-                self._safe_show_helper(lambda: self._show_update_dialog(latest, url, body))
-            else:
-                # 区分已是最新 vs 网络错误
-                if latest:
-                    msg = f"当前版本 {APP_VERSION} 已经是最新版！"
-                    title = "版本检查"
+                if result_holder[0] is None:
+                    # 防御：结果未填充，视作网络故障
+                    self._safe_show_helper(lambda: self._show_dialog(
+                        '网络故障', '检查更新失败，未获得有效响应。'
+                    ))
+                    return
+
+                has_update, latest, url, body = result_holder[0]
+                if has_update:
+                    self._safe_show_helper(lambda: self._show_update_dialog(latest, url, body))
                 else:
-                    msg = f"检查更新失败，请检查网络设置。\n错误信息: {body}"
-                    title = "网络故障"
-                self._safe_show_helper(lambda: self._show_dialog(title, msg))
+                    if latest:
+                        msg = f'当前版本 {APP_VERSION} 已经是最新版！'
+                        title = '版本检查'
+                    else:
+                        msg = f'检查更新失败，请检查网络设置。\n错误信息: {body}'
+                        title = '网络故障'
+                    self._safe_show_helper(lambda: self._show_dialog(title, msg))
+            except Exception as ex:
+                logger.error(f'检查更新 watchdog 异常: {ex}')
+                # 兜底恢复：任何异常都要让按钮回到可点击状态
+                try:
+                    btn.content = original_content or self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, '检查更新', color=COLORS['text_primary'])
+                    self._safe_update()
+                except Exception:
+                    pass
+            finally:
+                self._check_update_busy = False
 
         threading.Thread(target=watchdog, daemon=True).start()
 
@@ -398,14 +575,11 @@ class MouseBatteryApp:
             builder()
             self.page.update()
         except Exception as e:
-            logger.error(f"UI 弹窗失败: {e}")
+            logger.error(f'UI 弹窗失败: {e}')
 
     def _show_update_dialog(self, version: str, url: str, body: str):
-        # 进度条用主强调色（绿色），轨道用暗色描边保证暗底下可见
-        pb = ft.ProgressBar(width=400, color=COLORS['accent_green'],
-                            bgcolor=COLORS['bg_muted'], value=0)
-        status_txt = ft.Text(f"准备升级到 {version}...",
-                             color=COLORS['text_secondary'], size=12)
+        pb = ft.ProgressBar(width=400, color=COLORS['accent_green'], bgcolor=COLORS['bg_line'], value=0)
+        status_txt = ft.Text(f'准备升级到 {version}...', color=COLORS['text_secondary'], size=12)
 
         def do_update(e):
             dialog.actions[0].disabled = True
@@ -413,11 +587,12 @@ class MouseBatteryApp:
             self._safe_update()
 
             last_pct = [-1]
+
             def progress(pct, dl, total):
                 if pct != last_pct[0]:
                     last_pct[0] = pct
                     pb.value = pct / 100.0
-                    status_txt.value = f"正在下载... {pct}%"
+                    status_txt.value = f'正在下载... {pct}%'
                     self._safe_update()
 
             def worker():
@@ -428,9 +603,10 @@ class MouseBatteryApp:
 
                 success = updater.download_and_install(url, progress, host_pid=host_pid)
                 if not success:
-                    status_txt.value = "更新失败或仍在调试环境中，请直接去 GitHub 下载"
-                    dialog.actions[1].disabled = False  # 允许关闭
+                    status_txt.value = '更新失败或仍在调试环境中，请直接去 GitHub 下载'
+                    dialog.actions[1].disabled = False
                     self._safe_update()
+
             threading.Thread(target=worker, daemon=True).start()
 
         def close_dialog(e):
@@ -438,334 +614,271 @@ class MouseBatteryApp:
             self._safe_update()
 
         dialog = ft.AlertDialog(
-            title=ft.Text(f"发现新版本 {version}"),
+            title=ft.Text(f'发现新版本 {version}', color=COLORS['text_primary']),
             content=ft.Column([
-                ft.Text("发版更新记录：", size=13),
+                ft.Text('发版更新记录：', size=13, color=COLORS['text_primary']),
                 ft.Container(
-                    content=ft.Text(body, size=12, color=COLORS['text_dim'], selectable=True),
+                    content=ft.Text(body, size=12, color=COLORS['text_secondary'], selectable=True),
                     height=100,
                 ),
                 ft.Container(height=5),
                 status_txt,
-                pb
+                pb,
             ], tight=True, scroll=ft.ScrollMode.AUTO),
             actions=[
-                ft.TextButton("立即热更新", on_click=do_update),
-                ft.TextButton("稍后", on_click=close_dialog)
+                ft.TextButton('立即热更新', on_click=do_update),
+                ft.TextButton('稍后', on_click=close_dialog),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
-            shape=ft.RoundedRectangleBorder(radius=10)
+            shape=ft.RoundedRectangleBorder(radius=14),
         )
         self.page.show_dialog(dialog)
         return dialog
 
-    def _make_btn_content(self, icon_name, label: str) -> ft.Row:
-        """创建按钮内部内容（icon + text）"""
+    def _make_btn_content(self, icon_name, label: str, color: str = None) -> ft.Row:
+        """创建按钮内部内容（icon + text）。"""
+        text_color = color or COLORS['text_primary']
         return ft.Row(
             controls=[
-                ft.Icon(icon_name, size=18),
-                ft.Text(label, size=13, weight=ft.FontWeight.W_500),
+                ft.Icon(icon_name, size=18, color=text_color),
+                ft.Text(label, size=14, weight=ft.FontWeight.W_500, color=text_color),
             ],
-            spacing=6,
+            spacing=8,
             alignment=ft.MainAxisAlignment.CENTER,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
     def build(self, page: ft.Page):
         """
-        构建主界面（Dark OLED 风格）。
-        从上到下：品牌头部 → 分割线 → 可滚动内容区(设备卡片+设置+作者) → 固定底部操作栏。
+        构建主界面（浅色极简风格）。
+        从上到下：头部 → 电量卡片 → 设置卡片 → 操作按钮 → 设备状态栏。
         """
         self.page = page
 
         # —— 窗口配置 ——
-        page.title = "鼠标电量监控"
+        page.title = '鼠标电量监控'
         ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.ico')
         if os.path.exists(ico_path):
             page.window.icon = ico_path
         page.window.width = 520
-        page.window.height = 760
+        page.window.height = 720
         page.window.min_width = 460
-        page.window.min_height = 540
-        page.bgcolor = COLORS['bg_dark']
+        page.window.min_height = 700
+        page.bgcolor = COLORS['bg_app']
         page.padding = 0
-        page.theme_mode = ft.ThemeMode.DARK
-        # 主题统一使用较清晰的 Segoe UI（Flet 桌面端默认字体），保证中文渲染
-        # 主题统一使用较清晰的 Segoe UI（Flet 桌面端默认字体），保证中文渲染
-        # ColorScheme 仅使用 Flet 0.80 合法字段，遵循 Material 3 规范
+        page.theme_mode = ft.ThemeMode.LIGHT
         page.theme = ft.Theme(
-            font_family="Segoe UI",
+            font_family='Segoe UI',
             color_scheme=ft.ColorScheme(
-                primary=COLORS['accent_green'],          # 主强调色：正向指标绿
-                on_primary=COLORS['bg_dark'],            # 主色上的前景文字
-                secondary=COLORS['accent_blue'],         # 次强调色：蓝色
-                on_secondary=COLORS['text_primary'],
-                surface=COLORS['bg_card'],                # 卡片表面色
-                on_surface=COLORS['text_primary'],        # 表面上的前景文字
-                outline=COLORS['bg_card_border'],         # 描边/边框色
-                error=COLORS['destructive'],              # 错误/破坏性色
+                primary=COLORS['accent_green'],
+                on_primary='#FFFFFF',
+                secondary=COLORS['accent_green_dark'],
+                on_secondary='#FFFFFF',
+                surface=COLORS['bg_card'],
+                on_surface=COLORS['text_primary'],
+                outline=COLORS['bg_line'],
+                error=COLORS['destructive'],
             ),
         )
 
         # —— 顶部标题区 ——
-        # 电池图标放进圆角徽章里，与按钮主色一致，强化品牌识别
         header_icon = ft.Container(
-            content=ft.Icon(ft.Icons.BATTERY_CHARGING_FULL,
-                           color=COLORS['accent_green'], size=22),
-            width=40, height=40,
-            border_radius=12,
-            bgcolor=COLORS['accent_green'] + "1A",  # 10% 透明主色填充
-            border=ft.Border.all(1, COLORS['accent_green'] + "40"),
+            content=ft.Icon(ft.Icons.BATTERY_CHARGING_FULL, color='#FFFFFF', size=24),
+            width=48,
+            height=48,
+            border_radius=14,
+            bgcolor=COLORS['accent_green'],
             alignment=ft.Alignment.CENTER,
+            shadow=ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=20,
+                color=_alpha(COLORS['accent_green'], '33'),
+                offset=ft.Offset(0, 8),
+            ),
         )
         header = ft.Container(
-            content=ft.Column(
+            content=ft.Row(
                 controls=[
-                    ft.Row(
+                    header_icon,
+                    ft.Column(
                         controls=[
-                            header_icon,
-                            ft.Text(
-                                "鼠标电量监控",
-                                size=22, weight=ft.FontWeight.W_700,
-                                color=COLORS['text_primary'],
-                            ),
+                            ft.Text('鼠标电量监控', size=24, weight=ft.FontWeight.W_700, color=COLORS['text_primary']),
+                            ft.Text('实时查看无线鼠标电量', size=14, color=COLORS['text_secondary']),
                         ],
-                        spacing=12,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    ft.Text(
-                        "Mouse Battery Monitor · 实时无线鼠标电池状态",
-                        size=12, color=COLORS['text_secondary'],
+                        spacing=6,
+                        alignment=ft.MainAxisAlignment.CENTER,
                     ),
                 ],
-                spacing=4,
+                spacing=16,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            padding=ft.Padding.only(left=24, top=24, bottom=10, right=24),
+            padding=ft.Padding.only(left=28, right=28, top=20, bottom=12),
         )
 
-        # —— 分割线（更柔和的暗色细线）——
-        divider = ft.Container(
-            height=1,
-            bgcolor=COLORS['bg_card'] + "00",  # 透明背景
-            margin=ft.Margin.symmetric(horizontal=24),
-            border=ft.Border.only(bottom=ft.BorderSide(1, COLORS['bg_card_border'] + "AA")),
-        )
-
-        # 设备卡片列表
+        # 设备卡片列表。通常只有一个设备，但保留多设备扩展能力。
         self.card_list = ft.Column(
             controls=[],
-            spacing=8,
-            scroll=ft.ScrollMode.AUTO,
-        )
-        card_container = ft.Container(
-            content=self.card_list,
-            expand=True,
-            padding=ft.Padding.only(left=16, right=16, top=12, bottom=6),
+            spacing=0,
         )
 
         # 状态文本（底部状态栏左侧的设备计数）
-        self.status_text = ft.Text("", size=12, color=COLORS['text_secondary'])
+        self.status_text = ft.Text('', size=13, color=COLORS['text_secondary'])
 
-        # 扫描按钮 — 主操作（绿色强调，实心填充，Flet 0.80 content API）
-        self.scan_btn_row = self._make_btn_content(ft.Icons.SEARCH, "扫描设备")
-        self.scan_btn = ft.ElevatedButton(
-            content=self.scan_btn_row,
-            style=ft.ButtonStyle(
-                bgcolor=COLORS['accent_green'],
-                color=COLORS['bg_dark'],  # 深底字，在亮绿按钮上保持高对比
-                shape=ft.RoundedRectangleBorder(radius=10),
-                padding=ft.Padding.symmetric(horizontal=18, vertical=9),
-                elevation=0,
-            ),
-            on_click=self._on_scan_click,
-        )
+        # 扫描按钮 — 主操作
+        self.scan_btn_row = self._make_btn_content(ft.Icons.SEARCH, '扫描设备', color=COLORS['text_primary'])
+        self.scan_btn = build_action_button(self.scan_btn_row, primary=False, on_click=self._on_scan_click)
 
-        # 刷新按钮 — 次操作（描边样式）
-        self.refresh_btn_row = self._make_btn_content(ft.Icons.REFRESH, "刷新电量")
-        self.refresh_btn = ft.OutlinedButton(
-            content=self.refresh_btn_row,
-            style=ft.ButtonStyle(
-                color=COLORS['text_primary'],
-                shape=ft.RoundedRectangleBorder(radius=10),
-                side=ft.BorderSide(1, COLORS['bg_card_border']),
-                padding=ft.Padding.symmetric(horizontal=18, vertical=9),
-            ),
-            on_click=self._on_refresh_click,
-        )
+        # 刷新按钮 — 次操作
+        self.refresh_btn_row = self._make_btn_content(ft.Icons.REFRESH, '刷新电量', color=COLORS['text_primary'])
+        self.refresh_btn = build_action_button(self.refresh_btn_row, primary=False, on_click=self._on_refresh_click)
 
-        # 自动刷新开关
+        # 检查更新按钮 — 次操作
+        self.check_update_btn_row = self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, '检查更新', color=COLORS['text_primary'])
+        self.check_update_btn = build_action_button(self.check_update_btn_row, primary=False, on_click=self._on_check_update_click)
+
+        # 自动刷新开关：会话级开关，默认开启。
+        # 故意不持久化：与「开机自启」「自动检查更新」不同，此项控制的是当前 GUI 会话内
+        # 是否周期刷新电量，重启后恢复默认开启更符合「插上鼠标就想看电量」的预期。
+        # 切换会即时 start_auto_refresh(60)/stop_auto_refresh()，首次启动由 _start_scan 兜底开启。
         self.auto_switch = ft.Switch(
-            label="自动刷新",
-            label_text_style=ft.TextStyle(size=12, color=COLORS['text_secondary']),
             value=True,
             active_color=COLORS['accent_green'],
             on_change=self._on_auto_toggle,
         )
 
-        # 底部操作栏（固定在窗口底部，与内容区分离避免遮挡）
-        bottom_bar = ft.Container(
-            content=ft.Row(
-                controls=[
-                    self.scan_btn,
-                    self.refresh_btn,
-                    ft.Container(expand=True),
-                    self.status_text,
-                    self.auto_switch,
-                ],
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
-            ),
-            bgcolor=COLORS['bg_card'],
-            border_radius=ft.BorderRadius.only(top_left=16, top_right=16),
-            border=ft.Border.only(top=ft.BorderSide(1, COLORS['bg_card_border'])),
-            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
-        )
-
-        # ========= 偏好设置面板 =========
-        # 设置组标题去掉 emoji，改用 Settings 图标徽章 + 文字；统一用 token 颜色
+        # ========= 设置面板 =========
         settings_title = ft.Row(
             controls=[
-                ft.Container(
-                    content=ft.Icon(ft.Icons.SETTINGS,
-                                    color=COLORS['text_secondary'], size=18),
-                    width=32, height=32,
-                    border_radius=10,
-                    bgcolor=COLORS['bg_muted'],
-                    border=ft.Border.all(1, COLORS['bg_card_border']),
-                    alignment=ft.Alignment.CENTER,
-                ),
-                ft.Text("个性化设置", size=17,
-                        weight=ft.FontWeight.W_700, color=COLORS['text_primary']),
+                ft.Icon(ft.Icons.SETTINGS_OUTLINED, color=COLORS['text_secondary'], size=24),
+                ft.Text('设置', size=20, weight=ft.FontWeight.W_700, color=COLORS['text_primary']),
             ],
-            spacing=10,
+            spacing=12,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        settings_card = ft.Card(
-            bgcolor=COLORS['bg_card'],
-            elevation=0,
-            content=ft.Container(
-                padding=ft.Padding.symmetric(horizontal=18, vertical=16),
-                content=ft.Column([
-                    settings_title,
-                    ft.Container(height=4),
-                    ft.Divider(height=1, color=COLORS['bg_card_border']),
-                    ft.Container(height=2),
 
-                    # 1. 开机自启
-                    ft.ListTile(
-                        leading=ft.Icon(ft.Icons.ROCKET_LAUNCH,
-                                        color=COLORS['accent_green']),
-                        title=ft.Text("开机自动启动",
-                                      color=COLORS['text_primary'], size=14,
-                                      weight=ft.FontWeight.W_500),
-                        subtitle=ft.Text("跟随 Windows 启动，在后台静默运行",
-                                         color=COLORS['text_secondary'], size=12),
-                        trailing=ft.Switch(
-                            value=self.config_manager.check_autostart(),
-                            active_color=COLORS['accent_green'],
-                            on_change=self._on_autostart_toggle
-                        )
-                    ),
-
-                    # 2. 低电量提醒
-                    ft.ListTile(
-                        leading=ft.Icon(ft.Icons.BATTERY_ALERT,
-                                        color=COLORS['battery_low']),
-                        title=ft.Text("低电量弹窗提醒",
-                                      color=COLORS['text_primary'], size=14,
-                                      weight=ft.FontWeight.W_500),
-                        subtitle=ft.Text("系统右下角弹出通知，阶梯防漏式告警",
-                                         color=COLORS['text_secondary'], size=12),
-                        trailing=ft.Dropdown(
-                            width=104,
-                            value=str(self.config_manager.low_battery_notify),
-                            options=[
-                                ft.DropdownOption(key="0", text="关闭"),
-                                ft.DropdownOption(key="10", text="10%"),
-                                ft.DropdownOption(key="20", text="20%"),
-                                ft.DropdownOption(key="30", text="30%"),
-                            ],
-                            text_style=ft.TextStyle(size=13,
-                                                    color=COLORS['text_primary']),
-                            border_color=COLORS['bg_card_border'],
-                            border_radius=ft.BorderRadius.all(8),
-                            bgcolor=COLORS['bg_input'],
-                            on_select=self._on_notify_change
-                        )
-                    ),
-
-                    # 3. 自动更新与版本
-                    ft.ListTile(
-                        leading=ft.Icon(ft.Icons.SYSTEM_UPDATE_ALT,
-                                        color=COLORS['accent_cyan']),
-                        title=ft.Text(f"版本更新 · 当前 {APP_VERSION}",
-                                      color=COLORS['text_primary'], size=14,
-                                      weight=ft.FontWeight.W_500),
-                        subtitle=ft.Text("启动时自动下载新版本并静默升级",
-                                         color=COLORS['text_secondary'], size=12),
-                        trailing=ft.Container(
-                            width=145,
-                            content=ft.Row(
-                                [
-                                    ft.ElevatedButton(
-                                        content=ft.Text("检查", size=13,
-                                                        weight=ft.FontWeight.W_500),
-                                        on_click=self._on_check_update_click,
-                                        style=ft.ButtonStyle(
-                                            bgcolor=COLORS['accent_cyan'],
-                                            color=COLORS['bg_dark'],
-                                            padding=ft.Padding.symmetric(
-                                                horizontal=12, vertical=7),
-                                            shape=ft.RoundedRectangleBorder(radius=8),
-                                            elevation=0,
-                                        )
-                                    ),
-                                    ft.Switch(
-                                        value=self.config_manager.auto_update,
-                                        active_color=COLORS['accent_green'],
-                                        on_change=self._on_autoupdate_toggle
-                                    )
-                                ],
-                                alignment=ft.MainAxisAlignment.END,
-                                spacing=6
-                            )
-                        )
-                    )
-                ], spacing=6)
-            )
+        autostart_switch = ft.Switch(
+            value=self.config_manager.check_autostart(),
+            active_color=COLORS['accent_green'],
+            on_change=self._on_autostart_toggle,
         )
 
-        # 作者信息（底部水印，居中弱化）
+        self.notify_threshold_control = build_threshold_stepper(
+            self.config_manager.low_battery_notify,
+            on_decrease=self._on_notify_decrease,
+            on_increase=self._on_notify_increase,
+        )
+
+        auto_update_switch = ft.Switch(
+            value=self.config_manager.auto_update,
+            active_color=COLORS['accent_green'],
+            on_change=self._on_autoupdate_toggle,
+        )
+
+        settings_card = build_card(
+            content=ft.Column(
+                controls=[
+                    settings_title,
+                    ft.Container(height=1, bgcolor=COLORS['bg_line'], margin=ft.Margin.only(top=6, bottom=4)),
+                    build_setting_row(
+                        ft.Icons.POWER_SETTINGS_NEW,
+                        '开机自动启动',
+                        '跟随 Windows 启动，在后台静默运行',
+                        build_trailing_box(autostart_switch),
+                    ),
+                    build_setting_row(
+                        ft.Icons.NOTIFICATIONS_NONE_OUTLINED,
+                        '低电量提醒',
+                        '系统右下角弹出通知，阶梯防漏式告警',
+                        build_trailing_box(self.notify_threshold_control),
+                    ),
+                    build_setting_row(
+                        ft.Icons.SYNC,
+                        f'自动检查更新 · 当前 {APP_VERSION}',
+                        '启动时自动下载新版本并静默升级',
+                        build_trailing_box(auto_update_switch),
+                    ),
+                ],
+                spacing=6,
+            ),
+            padding=ft.Padding.symmetric(horizontal=24, vertical=16),
+            margin=ft.Margin.only(bottom=10),
+        )
+
+        # 操作按钮区：不再做厚重固定底栏，改成轻按钮组。
+        action_row = ft.Row(
+            controls=[
+                self.scan_btn,
+                self.refresh_btn,
+                self.check_update_btn,
+            ],
+            spacing=12,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        # 底部设备状态条。
+        status_bar = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.MOUSE_OUTLINED, size=18, color=COLORS['text_secondary']),
+                            self.status_text,
+                        ],
+                        spacing=10,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Container(expand=True),
+                    # 自动刷新文字和开关组成紧凑组，避免右侧空白过大。
+                    ft.Row(
+                        controls=[
+                            ft.Text('自动刷新', size=13, color=COLORS['text_secondary']),
+                            ft.Container(width=70, content=self.auto_switch, alignment=ft.Alignment.CENTER),
+                        ],
+                        spacing=0,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=COLORS['bg_card'],
+            border_radius=16,
+            border=ft.Border.all(1, COLORS['bg_line']),
+            padding=ft.Padding.symmetric(horizontal=18, vertical=8),
+        )
+
         author_info = ft.Container(
             content=ft.Text(
-                "Made by ZGMFX01A · 839140758@qq.com",
-                size=11, color=COLORS['text_dim'],
+                'Made by ZGMFX01A',
+                size=11,
+                color=COLORS['text_dim'],
                 text_align=ft.TextAlign.CENTER,
-                width=460,
             ),
-            padding=ft.Padding.only(bottom=8),
+            alignment=ft.Alignment.CENTER,
+            padding=ft.Padding.only(top=2),
         )
 
-        # 将鼠标设备列表与设置面板打包放入可滚动区域，防止挤占底部状态栏
-        scrollable_content = ft.Column(
-            controls=[
-                card_container,
-                settings_card,
-                author_info,
-            ],
-            scroll=ft.ScrollMode.AUTO,
-            expand=True,
-            spacing=12,
+        main_content = ft.Container(
+            content=ft.Column(
+                controls=[
+                    self.card_list,
+                    settings_card,
+                    action_row,
+                    status_bar,
+                    author_info,
+                ],
+                spacing=10,
+                scroll=None,
+                expand=False,
+            ),
+            padding=ft.Padding.only(left=28, right=28, bottom=12),
+            expand=False,
         )
 
-        # 组装页面
         page.add(
             ft.Column(
                 controls=[
                     header,
-                    divider,
-                    scrollable_content,
-                    bottom_bar
+                    main_content,
                 ],
                 expand=True,
                 spacing=0,
@@ -776,26 +889,39 @@ class MouseBatteryApp:
         self._start_scan()
 
     def _update_btn_content(self, btn_row: ft.Row, icon_name, label: str):
-        """更新按钮内容"""
+        """更新按钮内容。"""
         if btn_row and len(btn_row.controls) >= 2:
-            btn_row.controls[0] = ft.Icon(icon_name, size=18)
-            btn_row.controls[1] = ft.Text(label, size=13, weight=ft.FontWeight.W_500)
+            color = COLORS['text_primary']
+            btn_row.controls[0] = ft.Icon(icon_name, size=18, color=color)
+            btn_row.controls[1] = ft.Text(label, size=14, weight=ft.FontWeight.W_500, color=color)
 
     def _start_scan(self):
-        """后台扫描设备"""
-        if self.scan_btn:
-            self.scan_btn.disabled = True
-        self._update_btn_content(self.scan_btn_row, ft.Icons.HOURGLASS_TOP, "扫描中...")
+        """后台扫描设备。
+
+        使用 _scan_busy 锁防止扫描进行中被重复点击触发并发扫描（Container.disabled
+        在 Flet 中无法拦截 on_click）。同时禁用刷新按钮，避免与刷新 HID 读写争抢。
+        扫描结束由 _on_device_update 回调驱动 _refresh_ui 恢复按钮，但这里也兜底释放锁。
+        """
+        if self._scan_busy:
+            return
+        self._scan_busy = True
+
+        self._update_btn_content(self.scan_btn_row, ft.Icons.HOURGLASS_TOP, '扫描中...')
         if self.refresh_btn:
             self.refresh_btn.disabled = True
         if self.status_text:
-            self.status_text.value = "正在扫描设备..."
+            self.status_text.value = '正在扫描设备...'
         self._safe_update()
 
         def worker():
-            self.device_manager.scan_and_refresh()
-            if self.auto_switch and self.auto_switch.value:
-                self.device_manager.start_auto_refresh(60)
+            try:
+                self.device_manager.scan_and_refresh()
+                if self.auto_switch and self.auto_switch.value:
+                    self.device_manager.start_auto_refresh(60)
+            except Exception as ex:
+                logger.error(f'扫描设备异常: {ex}')
+            finally:
+                self._scan_busy = False
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -804,7 +930,7 @@ class MouseBatteryApp:
             try:
                 self._refresh_ui()
             except Exception as e:
-                logger.error(f"UI 刷新错误: {e}")
+                logger.error(f'UI 刷新错误: {e}')
 
     def _refresh_ui(self):
         if not self.card_list or not self.page:
@@ -822,14 +948,14 @@ class MouseBatteryApp:
         # 恢复按钮状态
         if self.scan_btn:
             self.scan_btn.disabled = False
-        self._update_btn_content(self.scan_btn_row, ft.Icons.SEARCH, "扫描设备")
+        self._update_btn_content(self.scan_btn_row, ft.Icons.SEARCH, '扫描设备')
         if self.refresh_btn:
             self.refresh_btn.disabled = False
-        self._update_btn_content(self.refresh_btn_row, ft.Icons.REFRESH, "刷新电量")
+        self._update_btn_content(self.refresh_btn_row, ft.Icons.REFRESH, '刷新电量')
 
         if self.status_text:
             count = len(mice)
-            self.status_text.value = f"已发现 {count} 个设备" if mice else "未发现设备"
+            self.status_text.value = f'已发现 {count} 个设备' if mice else '未发现设备'
 
         self._safe_update()
 
@@ -837,15 +963,39 @@ class MouseBatteryApp:
         self._start_scan()
 
     def _on_refresh_click(self, e):
+        """刷新当前已连接设备的电量。
+
+        使用 _refresh_busy 锁防止与扫描、与自身并发。出错时也要恢复按钮，
+        因为 refresh_only 失败并不会触发 _refresh_ui（_notify_update 仍会回调，
+        但回调内若抛异常按钮就不可恢复），这里兜底处理。
+        """
+        if self._refresh_busy:
+            return
+        self._refresh_busy = True
         if self.refresh_btn:
             self.refresh_btn.disabled = True
-        self._update_btn_content(self.refresh_btn_row, ft.Icons.HOURGLASS_TOP, "刷新中...")
+        self._update_btn_content(self.refresh_btn_row, ft.Icons.HOURGLASS_TOP, '刷新中...')
         if self.status_text:
-            self.status_text.value = "正在刷新电量..."
+            self.status_text.value = '正在刷新电量...'
         self._safe_update()
 
         def worker():
-            self.device_manager.refresh_only()
+            try:
+                self.device_manager.refresh_only()
+            except Exception as ex:
+                logger.error(f'刷新电量异常: {ex}')
+                # 出错兜底：手动恢复按钮，避免界面卡死
+                try:
+                    if self.refresh_btn:
+                        self.refresh_btn.disabled = False
+                    self._update_btn_content(self.refresh_btn_row, ft.Icons.REFRESH, '刷新电量')
+                    if self.status_text:
+                        self.status_text.value = '刷新失败，请重试'
+                    self._safe_update()
+                except Exception:
+                    pass
+            finally:
+                self._refresh_busy = False
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -858,18 +1008,65 @@ class MouseBatteryApp:
     def _on_autostart_toggle(self, e):
         self.config_manager.set_autostart(e.control.value)
 
+    def _set_notify_threshold(self, value: int):
+        """设置低电量提醒阈值，并同步刷新轻量步进控件。
+
+        仅接受 _NOTIFY_ALLOWED_VALUES 中的合法档位，非法值（如来自旧下拉框的脏数据）直接拒绝。
+        """
+        if value not in self._NOTIFY_ALLOWED_VALUES:
+            logger.warning(f'低电量阈值非法值: {value!r}')
+            return
+
+        self.config_manager.low_battery_notify = value
+        logger.info(f'低电量提醒修改为: {value}%')
+
+        # Flet 控件树里没有类似 React 的自动重绘，这里直接替换控件内容，避免只改文字导致布局状态残留。
+        if self.notify_threshold_control:
+            self.notify_threshold_control.content = build_threshold_stepper(
+                value,
+                on_decrease=self._on_notify_decrease,
+                on_increase=self._on_notify_increase,
+            ).content
+            self._safe_update()
+
+    def _on_notify_decrease(self, e):
+        """低电量阈值向下切换：30 → 20 → 10 → 关闭。
+
+        当前值若不在合法档位（配置被外部篡改等异常情况），默认回退到 20% 档（idx=2）。
+        """
+        current = self.config_manager.low_battery_notify
+        try:
+            idx = self._NOTIFY_ALLOWED_VALUES.index(current)
+        except ValueError:
+            idx = 2
+        self._set_notify_threshold(self._NOTIFY_ALLOWED_VALUES[max(0, idx - 1)])
+
+    def _on_notify_increase(self, e):
+        """低电量阈值向上切换：关闭 → 10 → 20 → 30。
+
+        顶部 30% 后再点 + 不再上升（钳制在最后一档），非法值默认回退到 20% 档。
+        """
+        current = self.config_manager.low_battery_notify
+        try:
+            idx = self._NOTIFY_ALLOWED_VALUES.index(current)
+        except ValueError:
+            idx = 2
+        self._set_notify_threshold(
+            self._NOTIFY_ALLOWED_VALUES[min(len(self._NOTIFY_ALLOWED_VALUES) - 1, idx + 1)]
+        )
+
     def _on_notify_change(self, e):
-        """低电量提醒阈值变更，带边界保护防止非数字值。"""
+        """兼容旧下拉框事件：当前界面已改用步进控件，但保留该入口兜底。
+
+        对传入值做整数化和档位校验：_set_notify_threshold 内部已基于
+        _NOTIFY_ALLOWED_VALUES 校验，这里仅做整数化，越界值由其拒绝。
+        """
         try:
             val = int(e.control.value)
         except (ValueError, TypeError):
-            logger.warning(f"低电量阈值非法值: {e.control.value!r}")
+            logger.warning(f'低电量阈值非法值: {e.control.value!r}')
             return
-        if not 0 <= val <= 100:
-            logger.warning(f"低电量阈值越界: {val}，已忽略")
-            return
-        self.config_manager.low_battery_notify = val
-        logger.info(f"低电量提醒修改为: {val}%")
+        self._set_notify_threshold(val)
 
     def _safe_update(self):
         """安全的页面刷新，捕捉跨线程导致的异常。"""

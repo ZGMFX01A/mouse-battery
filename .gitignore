@@ -26,3 +26,4 @@ Thumbs.db
 .env
 *.log
 .ace-tool/
+.codestable/
