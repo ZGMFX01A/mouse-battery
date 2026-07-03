@@ -59,6 +59,7 @@ jobs:
         with:
           name: Release ${{ steps.rename.outputs.VERSION }}
           prerelease: false
+          generate_release_notes: true
           files: dist/${{ steps.rename.outputs.EXE_NAME }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
