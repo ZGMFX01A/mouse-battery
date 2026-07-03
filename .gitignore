@@ -25,3 +25,4 @@ Thumbs.db
 # 其他环境相关
 .env
 *.log
+.ace-tool/
