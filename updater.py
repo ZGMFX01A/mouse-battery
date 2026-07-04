@@ -182,12 +182,16 @@ def consume_shutdown_request(current_pid: int) -> Optional[dict]:
 
 def _build_swap_script_lines(exe_path: str, old_exe_path: str,
                              new_exe_path: str, swap_script_path: str,
-                             target_pid: int) -> list[str]:
+                             target_pid: int,
+                             expected_size: int) -> list[str]:
     """构造外部替换脚本。
 
     先等待目标进程自行退出；若超时仍未退出，再回退到强制结束。
     这样可以优先走 [`start_update_shutdown_watchdog()`](main.py:93) 的优雅收尾，
     同时保留最终兜底能力，避免更新永久卡死。
+
+    expected_size 用于在替换前校验新 exe 字节数，拦截截断下载导致
+    PyInstaller onefile 解压后找不到 python312.dll 的情况。
     """
     return [
         "@echo off",
@@ -211,6 +215,17 @@ def _build_swap_script_lines(exe_path: str, old_exe_path: str,
         "ping 127.0.0.1 -n 2 >nul",
         "goto kill_retry",
         ":swap",
+        # 替换前先校验新 exe 大小是否与下载字节数一致。
+        # PyInstaller onefile 被"截断下载"后，bootloader 解压会找不到
+        # python312.dll（内嵌资源不全），报 MEIxxxxx\python312.dll 找不到。
+        # 这里通过字节数门槛拦截不完整产物，不达标的直接回滚保留旧 exe。
+        f'if not exist "{new_exe_path}" goto verify_fail',
+        # 用 for 取文件字节数；脚本文件里 %%~zI 是双百分号转义，运行时即 %~zI。
+        # 取到后用 !NEW_SIZE!（延迟展开）读取，因为 NEW_SIZE 在同一批处理段内
+        # 刚刚被 set，用 %NEW_SIZE% 普通展开会拿到旧值导致校验失效。
+        f'for %%I in ("{new_exe_path}") do set NEW_SIZE=%%~zI',
+        f'if not defined NEW_SIZE goto verify_fail',
+        f'if !NEW_SIZE! LSS {expected_size} goto verify_fail',
         "set SWAP_RETRY=0",
         ":swap_retry",
         "if %SWAP_RETRY% GEQ 20 goto fail",
@@ -225,6 +240,11 @@ def _build_swap_script_lines(exe_path: str, old_exe_path: str,
         f'start "" "{exe_path}"',
         f'del /f /q "{swap_script_path}" >nul 2>nul',
         "exit /b 0",
+        # 校验失败：不替换，清掉坏文件并退出，保留旧 exe 可继续运行。
+        ":verify_fail",
+        f'del /f /q "{new_exe_path}" >nul 2>nul',
+        f'del /f /q "{swap_script_path}" >nul 2>nul',
+        "exit /b 2",
         ":fail",
         f'del /f /q "{new_exe_path}" >nul 2>nul',
         f'del /f /q "{swap_script_path}" >nul 2>nul',
@@ -277,7 +297,27 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
         if downloaded <= 0:
             raise RuntimeError("下载到的更新文件为空")
 
-        logger.info(f"新版本下载完成: {new_exe_path}")
+        # 最小体积门槛：PyInstaller onefile 打包的 MouseBattery.exe 即使最小化
+        # 也会远超此值。低于此值必然是截断下载，直接拒绝替换，避免启动后
+        # bootloader 解压找不到 python312.dll（《MEIxxxxx\python312.dll 找不到》报错）。
+        MIN_VALID_EXE_BYTES = 1 * 1024 * 1024  # 1 MB
+        if downloaded < MIN_VALID_EXE_BYTES:
+            raise RuntimeError(
+                f"下载到的更新文件过小 ({downloaded} 字节)，疑似截断下载，已拒绝替换"
+            )
+
+        # 校验落盘后的实际字节数与下载计数一致；磁盘满/异常会导致写入不完整，
+        # 这时即便内核量达标也直接拒绝，避免坏文件替换掉可正常运行的旧 exe。
+        try:
+            actual_size = os.path.getsize(new_exe_path)
+        except OSError as size_err:
+            raise RuntimeError(f"读取已下载文件大小失败: {size_err}")
+        if actual_size != downloaded:
+            raise RuntimeError(
+                f"已下载文件大小不一致: expected={downloaded}, actual={actual_size}"
+            )
+
+        logger.info(f"新版本下载完成: {new_exe_path}, size={actual_size} bytes")
 
         # 2. 通过外部脚本完成替换与拉起，避免当前进程内自改名引发冻结
         #    路径全部加引号，避免含空格/中文路径出错；编码使用本地 OEM 兼容
@@ -287,6 +327,7 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
             new_exe_path=new_exe_path,
             swap_script_path=swap_script_path,
             target_pid=target_pid,
+            expected_size=actual_size,
         )
         with open(swap_script_path, 'w', encoding='utf-8', newline='\r\n') as f:
             f.write("\r\n".join(script_lines) + "\r\n")

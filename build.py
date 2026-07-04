@@ -94,18 +94,22 @@ def build():
     # 获取 flet 和 flet_desktop 的路径
     import flet
     flet_dir = os.path.dirname(flet.__file__)
-    
+
     # assets 目录路径
     assets_dir = os.path.join(os.path.dirname(__file__) or '.', 'assets')
     # app.ico 文件路径（用于运行时 Windows API 设置窗口图标）
     ico_file = os.path.join(os.path.dirname(__file__) or '.', 'app.ico')
-    
+
     cmd = [
         sys.executable, '-m', 'PyInstaller',
         '--onefile',
         '--noconsole',
         '--name', 'MouseBattery',
+        # --clean：打包前清理 PyInstaller 缓存，避免旧构建残留混入新 exe，
+        # 否则旧缓存可能导致 onefile 解压后模块不全（python312.dll 加载失败的诱因之一）。
         '--clean',
+        # --noconfirm：无交互环境下直接覆盖 dist，避免打包脚本卡在交互提示。
+        '--noconfirm',
         # Flet 依赖资源
         '--add-data', f'{flet_dir};flet',
         # 应用 assets（含窗口图标等）
@@ -130,6 +134,12 @@ def build():
         '--hidden-import', 'hid',
         '--hidden-import', 'flet',
         '--hidden-import', 'gui',
+        # flet 0.80+ 内部使用动态导入加载多个子模块，PyInstaller 静态分析
+        # 容易漏掉，导致 onefile 运行时缺模块；这里强制收集全 flet 子模块，
+        # 保证 _MEIPASS 解压后入口能完整加载依赖，避免 python312.dll 之后
+        # 又出现 flet.core 之类 ModuleNotFoundError。
+        '--collect-submodules', 'flet',
+        '--collect-submodules', 'flet_desktop',
         '--hidden-import', 'updater',
         'main.py',
     ])
