@@ -152,7 +152,8 @@ class RazerDevice:
         self._device: Optional[hid.device] = None
 
     def open(self) -> bool:
-        """打开 HID 设备"""
+        """打开 HID 设备。"""
+        self.close()
         try:
             self._device = hid.device()
             self._device.open_path(self.path)
@@ -165,13 +166,25 @@ class RazerDevice:
             return False
 
     def close(self):
-        """关闭 HID 设备"""
+        """关闭 HID 设备。"""
         if self._device:
             try:
                 self._device.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"关闭雷蛇设备失败: {e}")
             self._device = None
+
+    @staticmethod
+    def _status_name(status: int) -> str:
+        """把协议状态码转成可读文本，便于诊断不同失败分支。"""
+        return {
+            STATUS_NEW: "new",
+            STATUS_BUSY: "busy",
+            STATUS_SUCCESS: "success",
+            STATUS_FAILURE: "failure",
+            STATUS_TIMEOUT: "timeout",
+            STATUS_NOT_SUPPORTED: "not_supported",
+        }.get(status, f"unknown(0x{status:02X})")
 
     @staticmethod
     def _is_valid_response_for_request(response: bytes, request: bytes) -> bool:
@@ -216,6 +229,9 @@ class RazerDevice:
             time.sleep(0.1)  # 给设备一点时间处理
 
             start = time.monotonic()
+            busy_count = 0
+            mismatched_count = 0
+            poll_error_count = 0
             while (time.monotonic() - start) * 1000 < timeout_ms:
                 try:
                     response = self._device.get_feature_report(0x00, RAZER_REPORT_LEN + 1)
@@ -229,22 +245,39 @@ class RazerDevice:
                         if status == STATUS_SUCCESS:
                             if self._is_valid_response_for_request(resp, report):
                                 return resp
-                            logger.debug(f"忽略不匹配的 Razer 响应帧: {resp.hex()}")
+                            mismatched_count += 1
+                            if mismatched_count == 1 or mismatched_count % 5 == 0:
+                                logger.debug(
+                                    f"忽略不匹配的 Razer 响应帧[{mismatched_count}]: {resp.hex()}"
+                                )
                             continue
                         elif status == STATUS_BUSY:
+                            busy_count += 1
+                            if busy_count == 1 or busy_count % 5 == 0:
+                                logger.debug(f"Razer 设备忙[{busy_count}]，继续等待响应")
                             time.sleep(0.05)
                             continue
-                        elif status in (STATUS_FAILURE, STATUS_NOT_SUPPORTED):
-                            logger.debug(f"Razer 命令失败, status=0x{status:02X}")
+                        elif status in (STATUS_FAILURE, STATUS_TIMEOUT, STATUS_NOT_SUPPORTED):
+                            logger.debug(
+                                f"Razer 命令失败, status={self._status_name(status)}, raw={resp.hex()}"
+                            )
                             return None
                         else:
-                            # 非成功状态但也不是明确失败，继续等待下一帧
+                            logger.debug(
+                                f"Razer 收到未识别状态，继续等待: "
+                                f"status={self._status_name(status)}, raw={resp.hex()}"
+                            )
                             continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    poll_error_count += 1
+                    if poll_error_count == 1 or poll_error_count % 5 == 0:
+                        logger.debug(f"Razer 读取响应异常[{poll_error_count}]: {e}")
                 time.sleep(0.05)
 
-            logger.debug("Razer 响应超时")
+            logger.debug(
+                f"Razer 响应超时: busy={busy_count}, mismatched={mismatched_count}, "
+                f"poll_errors={poll_error_count}"
+            )
             return None
 
         except Exception as e:

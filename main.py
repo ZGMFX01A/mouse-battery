@@ -49,8 +49,10 @@ def acquire_single_instance(lock_name: str) -> bool:
         if err == ERROR_ALREADY_EXISTS:
             return False
         return True
-    except Exception:
-        # 互斥锁异常时不阻塞主流程
+    except Exception as e:
+        # 单实例校验失败时保持主流程可用，但要留下日志，
+        # 否则用户很难知道为什么偶发出现多实例。
+        logging.getLogger(__name__).warning(f"创建单实例互斥体失败，继续运行: {e}")
         return True
 
 
@@ -62,8 +64,8 @@ def release_single_instance():
         return
     try:
         ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(_instance_mutex_handle))
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"释放互斥体句柄失败: {e}")
     _instance_mutex_handle = None
 
 
@@ -96,7 +98,12 @@ def start_update_shutdown_watchdog(current_pid: int):
     def worker():
         global _shutdown_for_update, _shutdown_skip_gui_pid
         while True:
-            request = updater.consume_shutdown_request(current_pid)
+            try:
+                request = updater.consume_shutdown_request(current_pid)
+            except Exception as e:
+                logging.getLogger(__name__).error(f"读取热更新退出请求失败: {e}")
+                time.sleep(1.0)
+                continue
             if request:
                 _shutdown_for_update = request.get('reason') == 'update'
                 skip_gui_pid = request.get('skip_gui_pid')
@@ -154,8 +161,8 @@ def cleanup_settings_windows():
                                     creationflags=subprocess.CREATE_NO_WINDOW)
                 else:
                     p.terminate()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger(__name__).debug(f"清理 GUI 子进程失败: pid={p.pid}, err={e}")
     _settings_processes.clear()
 
 
@@ -220,6 +227,8 @@ if __name__ == '__main__':
         if not acquire_single_instance("Global\\MouseBattery_GUI_SingleInstance"):
             logger.info("设置窗口实例已存在，本次启动已忽略")
             sys.exit(0)
+        # GUI 独立进程也开启 watchdog，兼容直接以 GUI 模式运行或未来扩展的自更新路径。
+        start_update_shutdown_watchdog(os.getpid())
         try:
             launch_gui_mode()
         except KeyboardInterrupt:

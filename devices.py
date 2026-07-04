@@ -68,6 +68,8 @@ class DeviceManager:
         self._last_reconnect_time = 0.0
         self._auto_refresh_thread: Optional[threading.Thread] = None
         self._auto_refresh_running = False
+        self._auto_refresh_stop_event = threading.Event()
+        self._auto_refresh_thread_lock = threading.Lock()
         self._refresh_interval = 60  # 秒
         self._on_update_callbacks: list[Callable] = []
 
@@ -94,32 +96,34 @@ class DeviceManager:
     def _notify_update(self):
         """通知所有订阅者数据已更新"""
         self._write_shared_state()
-        for cb in self._on_update_callbacks:
+        callbacks = list(self._on_update_callbacks)
+        for cb in callbacks:
             try:
                 cb()
             except Exception as e:
                 logger.error(f"更新回调出错: {e}")
 
     def _write_shared_state(self):
-        """将当前设备状态写入共享 JSON 文件，供 GUI 子进程读取"""
+        """将当前设备状态原子写入共享 JSON 文件，供 GUI 子进程读取。"""
         state_file = get_shared_state_path()
+        temp_file = f"{state_file}.{os.getpid()}.tmp"
         try:
             with self._lock:
-                data = []
-                for m in self._mice:
-                    data.append({
-                        'name': m.name,
-                        'brand': m.brand.value if hasattr(m.brand, 'value') else str(m.brand),
-                        'percentage': m.percentage,
-                        'charging': m.charging,
-                        'status_text': m.status_text,
-                        'online': m.online,
-                        'last_update': m.last_update,
-                    })
-            with open(state_file, 'w', encoding='utf-8') as f:
+                data = [_serialize_mouse_state(m) for m in self._mice]
+
+            # 先写临时文件再替换正式文件，避免 GUI 在读取时遇到半截 JSON。
+            with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, state_file)
         except Exception as e:
-            logger.debug(f"写入共享状态文件失败: {e}")
+            logger.error(f"写入共享状态文件失败: {type(e).__name__}: {e}")
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except Exception as cleanup_error:
+                logger.debug(f"清理共享状态临时文件失败: {cleanup_error}")
 
     def scan_and_refresh(self):
         """扫描设备并刷新电池状态"""
@@ -127,7 +131,7 @@ class DeviceManager:
             self._close_all()
             self._scan_devices()
             self._refresh_battery()
-            self._notify_update()
+        self._notify_update()
 
     def refresh_only(self):
         """仅刷新已连接设备的电池状态"""
@@ -139,7 +143,7 @@ class DeviceManager:
                 logger.warning("检测到连续读取失败，触发自动重连恢复流程")
                 self._recover_connections_locked()
 
-            self._notify_update()
+        self._notify_update()
 
     def _recover_connections_locked(self):
         """自动恢复连接（调用方需持有 _io_lock）。"""
@@ -309,8 +313,9 @@ class DeviceManager:
                         )
                         continue
 
-                    if battery.percentage <= 0:
-                        # 硬件层面：任何返回 0 的结果几乎肯定是设备未就绪/深度休眠
+                    if battery.percentage < 0:
+                        # 只有明确的负值才视为无效样本；合法的 0% 需要保留给 UI/托盘展示，
+                        # 否则会把真实低电量误判成断连并丢失告警语义。
                         with self._lock:
                             mouse.percentage = -1
                             mouse.charging = False
@@ -403,33 +408,54 @@ class DeviceManager:
         return True
 
     def start_auto_refresh(self, interval: int = 60):
-        """启动自动刷新线程"""
-        self._refresh_interval = interval
-        if self._auto_refresh_running:
-            return
+        """启动自动刷新线程。
 
-        self._auto_refresh_running = True
-        self._auto_refresh_thread = threading.Thread(
-            target=self._auto_refresh_loop, daemon=True
-        )
-        self._auto_refresh_thread.start()
-        logger.info(f"自动刷新已启动，间隔 {interval} 秒")
+        使用 stop event + 单线程锁控制生命周期，避免快速停启时产生多个刷新线程。
+        """
+        safe_interval = max(1, int(interval))
+        with self._auto_refresh_thread_lock:
+            self._refresh_interval = safe_interval
+            if self._auto_refresh_thread and self._auto_refresh_thread.is_alive():
+                logger.debug(f"自动刷新线程已存在，仅更新间隔为 {safe_interval} 秒")
+                return
+
+            self._auto_refresh_stop_event.clear()
+            self._auto_refresh_running = True
+            self._auto_refresh_thread = threading.Thread(
+                target=self._auto_refresh_loop,
+                daemon=True,
+                name="device-auto-refresh",
+            )
+            self._auto_refresh_thread.start()
+        logger.info(f"自动刷新已启动，间隔 {safe_interval} 秒")
 
     def stop_auto_refresh(self):
-        """停止自动刷新"""
-        self._auto_refresh_running = False
+        """停止自动刷新，并尽量等待后台线程收尾。"""
+        thread = None
+        with self._auto_refresh_thread_lock:
+            self._auto_refresh_running = False
+            self._auto_refresh_stop_event.set()
+            thread = self._auto_refresh_thread
+
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2.5)
+
+        with self._auto_refresh_thread_lock:
+            if self._auto_refresh_thread is thread and (thread is None or not thread.is_alive()):
+                self._auto_refresh_thread = None
         logger.info("自动刷新已停止")
 
     def _auto_refresh_loop(self):
         """自动刷新循环"""
-        while self._auto_refresh_running:
-            time.sleep(self._refresh_interval)
-            if not self._auto_refresh_running:
-                break
+        while not self._auto_refresh_stop_event.wait(self._refresh_interval):
             try:
                 self.refresh_only()
             except Exception as e:
                 logger.error(f"自动刷新出错: {e}")
+        with self._auto_refresh_thread_lock:
+            self._auto_refresh_running = False
+            if threading.current_thread() is self._auto_refresh_thread:
+                self._auto_refresh_thread = None
 
     def _close_all(self):
         """关闭所有设备连接"""
@@ -443,9 +469,10 @@ class DeviceManager:
             self._mouse_to_device.clear()
 
     def shutdown(self):
-        """关闭管理器"""
+        """关闭管理器，先停线程，再串行关闭 HID 连接。"""
         self.stop_auto_refresh()
-        self._close_all()
+        with self._io_lock:
+            self._close_all()
         logger.info("设备管理器已关闭")
 
     @staticmethod
@@ -474,6 +501,68 @@ def get_shared_state_path() -> str:
     return os.path.join(base, '.device_state.json')
 
 
+def _serialize_mouse_state(mouse: MouseInfo) -> dict:
+    """将设备状态序列化为共享 JSON 可写入的数据结构。"""
+    return {
+        'name': mouse.name,
+        'brand': mouse.brand.value if hasattr(mouse.brand, 'value') else str(mouse.brand),
+        'percentage': mouse.percentage,
+        'charging': mouse.charging,
+        'status_text': mouse.status_text,
+        'online': mouse.online,
+        'last_update': mouse.last_update,
+    }
+
+
+def _coerce_shared_bool(value) -> bool:
+    """把共享状态里的布尔字段转成稳定布尔值。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return False
+
+
+def _coerce_shared_percentage(value) -> int:
+    """把共享状态里的电量值约束在项目约定范围内。"""
+    try:
+        pct = int(value)
+    except (TypeError, ValueError):
+        return -1
+    if pct < -1 or pct > 100:
+        return -1
+    return pct
+
+
+def _deserialize_mouse_state(item: dict, index: int) -> Optional[MouseInfo]:
+    """把共享 JSON 条目恢复为 [`MouseInfo`](devices.py:28)；脏条目会被跳过并记录日志。"""
+    if not isinstance(item, dict):
+        logger.warning(f"共享状态第 {index} 项不是对象，已忽略: {item!r}")
+        return None
+
+    try:
+        brand = Brand(item.get('brand', '罗技'))
+    except (ValueError, KeyError, TypeError):
+        brand = Brand.LOGITECH
+
+    try:
+        last_update = float(item.get('last_update', 0) or 0)
+    except (TypeError, ValueError):
+        last_update = 0.0
+
+    return MouseInfo(
+        name=str(item.get('name', '未知设备')),
+        brand=brand,
+        percentage=_coerce_shared_percentage(item.get('percentage', -1)),
+        charging=_coerce_shared_bool(item.get('charging', False)),
+        status_text=str(item.get('status_text', '未知')),
+        online=_coerce_shared_bool(item.get('online', False)),
+        last_update=last_update,
+    )
+
+
 class SharedStateDeviceManager:
     """
     只读的设备管理器，通过读取共享状态文件获取数据。
@@ -486,12 +575,35 @@ class SharedStateDeviceManager:
         self._on_update_callbacks: list[Callable] = []
         self._auto_refresh_running = False
         self._auto_refresh_thread: Optional[threading.Thread] = None
+        self._auto_refresh_stop_event = threading.Event()
+        self._auto_refresh_thread_lock = threading.Lock()
         self._refresh_interval = 3
+        # 最近一次共享状态读取结果，供 GUI 明确区分「空状态」和「读取失败」。
+        self._last_read_state = 'idle'
+        self._last_read_error = ''
 
     @property
     def mice(self) -> list[MouseInfo]:
         with self._lock:
             return list(self._mice)
+
+    @property
+    def last_read_state(self) -> str:
+        """最近一次共享状态读取结果：idle / ok / missing / error。"""
+        with self._lock:
+            return self._last_read_state
+
+    @property
+    def last_read_error(self) -> str:
+        """最近一次共享状态读取的用户可见提示。"""
+        with self._lock:
+            return self._last_read_error
+
+    def _set_last_read_result(self, state: str, error: str = ''):
+        """记录最近一次共享状态读取结果，供 GUI 决定展示空态还是错误态。"""
+        with self._lock:
+            self._last_read_state = state
+            self._last_read_error = error
 
     def set_on_update(self, callback: Callable):
         if callback not in self._on_update_callbacks:
@@ -506,40 +618,49 @@ class SharedStateDeviceManager:
             self._on_update_callbacks.remove(callback)
 
     def _notify_update(self):
-        for cb in self._on_update_callbacks:
+        callbacks = list(self._on_update_callbacks)
+        for cb in callbacks:
             try:
                 cb()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"共享状态更新回调出错: {e}")
 
     def _read_shared_state(self):
-        """从共享状态文件读取设备数据"""
+        """从共享状态文件读取设备数据。
+
+        读取时先完整解析再整体替换内存快照，避免损坏文件把当前 UI 状态打成半截数据。
+        """
         state_file = get_shared_state_path()
         try:
             if not os.path.exists(state_file):
+                with self._lock:
+                    self._mice = []
+                    self._last_read_state = 'missing'
+                    self._last_read_error = '尚未收到托盘进程写入的设备状态，请确认主程序正在运行。'
                 return
+
             with open(state_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+
+            if not isinstance(data, list):
+                raise ValueError(f"共享状态文件根节点不是数组: {type(data).__name__}")
+
             mice = []
-            for item in data:
-                try:
-                    brand = Brand(item.get('brand', '罗技'))
-                except (ValueError, KeyError):
-                    brand = Brand.LOGITECH
-                mouse = MouseInfo(
-                    name=item.get('name', '未知设备'),
-                    brand=brand,
-                    percentage=item.get('percentage', -1),
-                    charging=item.get('charging', False),
-                    status_text=item.get('status_text', '未知'),
-                    online=item.get('online', False),
-                    last_update=item.get('last_update', 0),
-                )
-                mice.append(mouse)
+            for idx, item in enumerate(data):
+                mouse = _deserialize_mouse_state(item, idx)
+                if mouse is not None:
+                    mice.append(mouse)
+
             with self._lock:
                 self._mice = mice
+                self._last_read_state = 'ok'
+                self._last_read_error = ''
         except Exception as e:
-            logger.debug(f"读取共享状态文件失败: {e}")
+            self._set_last_read_result(
+                'error',
+                '读取共享状态失败，当前显示上次有效结果。请稍后重试或确认托盘进程是否正常。'
+            )
+            logger.warning(f"读取共享状态文件失败，沿用上次有效快照: {type(e).__name__}: {e}")
 
     def scan_and_refresh(self):
         self._read_shared_state()
@@ -550,27 +671,47 @@ class SharedStateDeviceManager:
         self._notify_update()
 
     def start_auto_refresh(self, interval: int = 3):
-        self._refresh_interval = interval
-        if self._auto_refresh_running:
-            return
-        self._auto_refresh_running = True
-        self._auto_refresh_thread = threading.Thread(
-            target=self._auto_refresh_loop, daemon=True
-        )
-        self._auto_refresh_thread.start()
+        """启动共享状态轮询线程，避免 GUI 重复拉起多个读取线程。"""
+        safe_interval = max(1, int(interval))
+        with self._auto_refresh_thread_lock:
+            self._refresh_interval = safe_interval
+            if self._auto_refresh_thread and self._auto_refresh_thread.is_alive():
+                logger.debug(f"共享状态刷新线程已存在，仅更新间隔为 {safe_interval} 秒")
+                return
+            self._auto_refresh_stop_event.clear()
+            self._auto_refresh_running = True
+            self._auto_refresh_thread = threading.Thread(
+                target=self._auto_refresh_loop,
+                daemon=True,
+                name="shared-state-auto-refresh",
+            )
+            self._auto_refresh_thread.start()
 
     def stop_auto_refresh(self):
-        self._auto_refresh_running = False
+        """停止共享状态轮询线程。"""
+        thread = None
+        with self._auto_refresh_thread_lock:
+            self._auto_refresh_running = False
+            self._auto_refresh_stop_event.set()
+            thread = self._auto_refresh_thread
+
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+        with self._auto_refresh_thread_lock:
+            if self._auto_refresh_thread is thread and (thread is None or not thread.is_alive()):
+                self._auto_refresh_thread = None
 
     def _auto_refresh_loop(self):
-        while self._auto_refresh_running:
-            time.sleep(self._refresh_interval)
-            if not self._auto_refresh_running:
-                break
+        while not self._auto_refresh_stop_event.wait(self._refresh_interval):
             try:
                 self.refresh_only()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"共享状态自动刷新出错: {e}")
+        with self._auto_refresh_thread_lock:
+            self._auto_refresh_running = False
+            if threading.current_thread() is self._auto_refresh_thread:
+                self._auto_refresh_thread = None
 
     def shutdown(self):
         self.stop_auto_refresh()

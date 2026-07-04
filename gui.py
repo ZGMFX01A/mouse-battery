@@ -378,10 +378,16 @@ def _on_card_hover(e: ft.ControlEvent):
 # ============================================================
 
 
-def build_empty_state() -> ft.Container:
-    """未发现设备时的空状态占位。"""
+def build_empty_state(title: str = '未发现鼠标设备',
+                      message: str = '请确保鼠标已开机且无线接收器已插入\n如 G Hub / Synapse 正在运行，请先退出\n可能需要以管理员身份运行本程序',
+                      icon_name=ft.Icons.MOUSE_OUTLINED) -> ft.Container:
+    """构建空状态 / 加载态 / 错误态占位。
+
+    统一用同一套占位卡片承载「无设备」「加载中」「读取失败」三类状态，
+    避免不同分支各自拼文案导致界面反馈风格不一致。
+    """
     icon_badge = ft.Container(
-        content=ft.Icon(ft.Icons.MOUSE_OUTLINED, size=42, color=COLORS['text_secondary']),
+        content=ft.Icon(icon_name, size=42, color=COLORS['text_secondary']),
         width=84,
         height=84,
         border_radius=24,
@@ -394,16 +400,14 @@ def build_empty_state() -> ft.Container:
             controls=[
                 icon_badge,
                 ft.Text(
-                    '未发现鼠标设备',
+                    title,
                     size=20,
                     weight=ft.FontWeight.W_700,
                     color=COLORS['text_primary'],
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Text(
-                    '请确保鼠标已开机且无线接收器已插入\n'
-                    '如 G Hub / Synapse 正在运行，请先退出\n'
-                    '可能需要以管理员身份运行本程序',
+                    message,
                     size=13,
                     color=COLORS['text_secondary'],
                     text_align=ft.TextAlign.CENTER,
@@ -428,6 +432,9 @@ class MouseBatteryApp:
     # 低电量提醒允许的档位：关闭(0)、10%、20%、30%。
     # -/+ 步进与 _set_notify_threshold 校验共用此常量，避免多处硬编码不一致。
     _NOTIFY_ALLOWED_VALUES = (0, 10, 20, 30)
+    # GUI 只读取共享状态文件，不直接访问 HID；3 秒轮询能保持状态同步及时，
+    # 同时比硬件轮询轻量很多，适合作为设置窗口的默认刷新周期。
+    _GUI_STATE_REFRESH_INTERVAL = 3
 
     def __init__(self, device_manager: DeviceManager):
         self.device_manager = device_manager
@@ -451,6 +458,11 @@ class MouseBatteryApp:
         self._check_update_busy = False
         # 禁用态下文字/图标统一用次级灰色，保证视觉与逻辑一致
         self._disabled_color = COLORS['text_dim']
+        # 视图状态统一管理空态 / 加载态 / 错误态，避免多个入口各自拼接 UI 文案。
+        self._view_state = 'idle'
+        self._view_message = ''
+        # 用渲染签名避免每次收到回调都重建整组卡片，减少 Flet 控件树抖动。
+        self._last_render_signature = None
 
     def _on_autoupdate_toggle(self, e):
         self.config_manager.auto_update = e.control.value
@@ -492,6 +504,101 @@ class MouseBatteryApp:
             color = COLORS['text_primary']
             btn_row.controls[0] = ft.Icon(icon_default, size=18, color=color)
             btn_row.controls[1] = ft.Text(label_default, size=14, weight=ft.FontWeight.W_500, color=color)
+
+    def _set_view_state(self, state: str, message: str = ''):
+        """记录当前界面状态。
+
+        状态驱动顶部列表区占位内容：
+        - loading：首次进入或手动同步中
+        - empty：已完成读取但没有设备
+        - error：读取共享状态失败
+        - ready：有设备数据
+        """
+        self._view_state = state
+        self._view_message = message
+
+    def _shared_state_read_status(self) -> tuple[str, str]:
+        """读取共享状态层的最近一次同步结果。
+
+        GUI 只在设置窗口模式下依赖共享状态文件；这里通过弱依赖读取只读属性，
+        避免把 [`MouseBatteryApp`](gui.py:425) 和具体实现强耦合。
+        """
+        state = getattr(self.device_manager, 'last_read_state', 'ok')
+        message = getattr(self.device_manager, 'last_read_error', '')
+        return state, message
+
+    def _device_signature(self, mice: list[MouseInfo]):
+        """生成当前设备列表的轻量签名，用于判断是否需要整列表重建。"""
+        return tuple(
+            (
+                mouse.name,
+                mouse.brand.value,
+                mouse.percentage,
+                mouse.charging,
+                mouse.status_text,
+                mouse.online,
+                round(mouse.last_update, 2),
+            )
+            for mouse in mice
+        )
+
+    def _build_device_view_controls(self, mice: list[MouseInfo]):
+        """根据当前界面状态构建设备列表区域控件。"""
+        if mice:
+            return [build_mouse_card(mouse) for mouse in mice]
+
+        if self._view_state == 'loading':
+            return [build_empty_state(
+                title='正在同步设备状态',
+                message=self._view_message or '正在从托盘进程读取最新电量信息，请稍候…',
+                icon_name=ft.Icons.SYNC,
+            )]
+
+        if self._view_state == 'error':
+            return [build_empty_state(
+                title='读取设备状态失败',
+                message=self._view_message or '请确认托盘进程仍在运行，然后点击“刷新电量”重试。',
+                icon_name=ft.Icons.ERROR_OUTLINE,
+            )]
+
+        if self._view_state == 'empty' and self._view_message:
+            return [build_empty_state(
+                title='尚未同步到设备状态',
+                message=self._view_message,
+                icon_name=ft.Icons.SYNC,
+            )]
+
+        return [build_empty_state()]
+
+    def _sync_action_buttons(self):
+        """统一同步扫描/刷新按钮的禁用态与文案，避免不同分支各自恢复状态。"""
+        scan_disabled = self._scan_busy or self._refresh_busy
+        refresh_disabled = self._scan_busy or self._refresh_busy
+
+        if self.scan_btn:
+            self.scan_btn.disabled = scan_disabled
+        if self.refresh_btn:
+            self.refresh_btn.disabled = refresh_disabled
+
+        if self._scan_busy:
+            self._update_btn_content(self.scan_btn_row, ft.Icons.HOURGLASS_TOP, '扫描中...')
+        else:
+            self._set_btn_disabled_visual(self.scan_btn_row, scan_disabled, ft.Icons.SEARCH, '扫描设备')
+
+        if self._refresh_busy:
+            self._update_btn_content(self.refresh_btn_row, ft.Icons.HOURGLASS_TOP, '刷新中...')
+        else:
+            self._set_btn_disabled_visual(self.refresh_btn_row, refresh_disabled, ft.Icons.REFRESH, '刷新电量')
+
+    def _status_bar_message(self, mice: list[MouseInfo]) -> str:
+        """根据当前视图状态生成底部状态栏文案。"""
+        if self._view_state == 'loading':
+            return self._view_message or '正在同步设备状态...'
+        if self._view_state == 'error':
+            return self._view_message or '读取设备状态失败'
+        if self._view_state == 'ready' and self._view_message:
+            return self._view_message
+        return f'已发现 {len(mice)} 个设备' if mice else '未发现设备'
 
     def _on_check_update_click(self, e):
         """检查版本更新。
@@ -886,6 +993,7 @@ class MouseBatteryApp:
         )
 
         # 首次扫描
+        self._set_view_state('loading', '正在从托盘进程读取设备状态...')
         self._start_scan()
 
     def _update_btn_content(self, btn_row: ft.Row, icon_name, label: str):
@@ -902,26 +1010,28 @@ class MouseBatteryApp:
         在 Flet 中无法拦截 on_click）。同时禁用刷新按钮，避免与刷新 HID 读写争抢。
         扫描结束由 _on_device_update 回调驱动 _refresh_ui 恢复按钮，但这里也兜底释放锁。
         """
-        if self._scan_busy:
+        if self._scan_busy or self._refresh_busy:
             return
         self._scan_busy = True
 
-        self._update_btn_content(self.scan_btn_row, ft.Icons.HOURGLASS_TOP, '扫描中...')
-        if self.refresh_btn:
-            self.refresh_btn.disabled = True
-        if self.status_text:
-            self.status_text.value = '正在扫描设备...'
-        self._safe_update()
+        # GUI 进程只会从共享状态文件同步数据；当当前还没有可展示快照时，
+        # 直接切到加载态占位，避免底部状态栏显示“正在扫描”但主体区域仍是旧空态。
+        if not self.device_manager.mice:
+            self._set_view_state('loading', '正在从托盘进程同步设备状态...')
+        self._refresh_ui(force_rebuild=True)
 
         def worker():
             try:
                 self.device_manager.scan_and_refresh()
                 if self.auto_switch and self.auto_switch.value:
-                    self.device_manager.start_auto_refresh(60)
+                    self.device_manager.start_auto_refresh(self._GUI_STATE_REFRESH_INTERVAL)
             except Exception as ex:
                 logger.error(f'扫描设备异常: {ex}')
+                self._set_view_state('error', '同步设备状态失败，请确认托盘进程仍在运行。')
+                self._refresh_ui(force_rebuild=True)
             finally:
                 self._scan_busy = False
+                self._refresh_ui(force_rebuild=False)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -932,30 +1042,38 @@ class MouseBatteryApp:
             except Exception as e:
                 logger.error(f'UI 刷新错误: {e}')
 
-    def _refresh_ui(self):
+    def _refresh_ui(self, force_rebuild: bool = False):
         if not self.card_list or not self.page:
             return
 
         mice = self.device_manager.mice
-        self.card_list.controls.clear()
+        read_state, read_message = self._shared_state_read_status()
 
-        if not mice:
-            self.card_list.controls.append(build_empty_state())
-        else:
-            for mouse in mice:
-                self.card_list.controls.append(build_mouse_card(mouse))
+        if read_state == 'error':
+            if mice:
+                # 已有旧快照时保留设备卡片，但需要在状态栏显式提示当前数据可能不是最新的。
+                self._set_view_state('ready', read_message)
+            else:
+                self._set_view_state('error', read_message)
+        elif mice:
+            self._set_view_state('ready')
+        elif read_state == 'missing':
+            # 缺失共享状态文件不再无限停留在 loading；首轮读取后明确展示“尚未同步”。
+            self._set_view_state('empty', read_message)
+        elif self._view_state not in ('loading', 'error'):
+            self._set_view_state('empty')
 
-        # 恢复按钮状态
-        if self.scan_btn:
-            self.scan_btn.disabled = False
-        self._update_btn_content(self.scan_btn_row, ft.Icons.SEARCH, '扫描设备')
-        if self.refresh_btn:
-            self.refresh_btn.disabled = False
-        self._update_btn_content(self.refresh_btn_row, ft.Icons.REFRESH, '刷新电量')
+        render_signature = (self._view_state, self._view_message, self._device_signature(mice))
+        if force_rebuild or self._last_render_signature != render_signature:
+            self.card_list.controls.clear()
+            self.card_list.controls.extend(self._build_device_view_controls(mice))
+            self._last_render_signature = render_signature
+
+        # 按钮状态由统一入口恢复，避免扫描/刷新/自动更新互相覆盖文案。
+        self._sync_action_buttons()
 
         if self.status_text:
-            count = len(mice)
-            self.status_text.value = f'已发现 {count} 个设备' if mice else '未发现设备'
+            self.status_text.value = self._status_bar_message(mice)
 
         self._safe_update()
 
@@ -969,39 +1087,31 @@ class MouseBatteryApp:
         因为 refresh_only 失败并不会触发 _refresh_ui（_notify_update 仍会回调，
         但回调内若抛异常按钮就不可恢复），这里兜底处理。
         """
-        if self._refresh_busy:
+        if self._refresh_busy or self._scan_busy:
             return
         self._refresh_busy = True
-        if self.refresh_btn:
-            self.refresh_btn.disabled = True
-        self._update_btn_content(self.refresh_btn_row, ft.Icons.HOURGLASS_TOP, '刷新中...')
-        if self.status_text:
-            self.status_text.value = '正在刷新电量...'
-        self._safe_update()
+        if not self.device_manager.mice:
+            self._set_view_state('loading', '正在刷新共享状态，请稍候...')
+        self._refresh_ui(force_rebuild=not self.device_manager.mice)
 
         def worker():
             try:
                 self.device_manager.refresh_only()
             except Exception as ex:
                 logger.error(f'刷新电量异常: {ex}')
-                # 出错兜底：手动恢复按钮，避免界面卡死
-                try:
-                    if self.refresh_btn:
-                        self.refresh_btn.disabled = False
-                    self._update_btn_content(self.refresh_btn_row, ft.Icons.REFRESH, '刷新电量')
-                    if self.status_text:
-                        self.status_text.value = '刷新失败，请重试'
-                    self._safe_update()
-                except Exception:
-                    pass
+                # 没有现成设备快照时，错误态要在主体区域可见；
+                # 若已有旧快照，则保留卡片，仅更新底部状态文案即可。
+                self._set_view_state('error', '刷新失败，请稍后重试或重新打开设置窗口。')
+                self._refresh_ui(force_rebuild=not self.device_manager.mice)
             finally:
                 self._refresh_busy = False
+                self._refresh_ui(force_rebuild=False)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_auto_toggle(self, e):
         if self.auto_switch and self.auto_switch.value:
-            self.device_manager.start_auto_refresh(60)
+            self.device_manager.start_auto_refresh(self._GUI_STATE_REFRESH_INTERVAL)
         else:
             self.device_manager.stop_auto_refresh()
 
@@ -1073,5 +1183,5 @@ class MouseBatteryApp:
         try:
             if self.page:
                 self.page.update()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f'页面刷新已忽略: {e}')

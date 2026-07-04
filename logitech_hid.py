@@ -77,9 +77,15 @@ class LogitechReceiver:
         self.product_string = device_info.get('product_string', '未知接收器')
         self._device: Optional[hid.device] = None
         self._feature_cache: dict[int, int] = {}
+        # 长报文通道用于部分老设备/特殊端点，缓存 path 和 feature index
+        # 可以避免每次刷新都重新 enumerate + open，减少 HID 访问开销。
+        self._long_device: Optional[hid.device] = None
+        self._long_path = None
+        self._long_feature_cache: dict[int, int] = {}
 
     def open(self) -> bool:
-        """打开 HID 设备"""
+        """打开主 HID 设备通道。"""
+        self.close()
         try:
             self._device = hid.device()
             self._device.open_path(self.path)
@@ -92,14 +98,69 @@ class LogitechReceiver:
             return False
 
     def close(self):
-        """关闭 HID 设备"""
+        """关闭短报文与长报文通道，并清理缓存。"""
         if self._device:
             try:
                 self._device.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"关闭罗技主通道失败: {e}")
             self._device = None
-            self._feature_cache.clear()
+
+        self._close_long_device()
+        self._long_path = None
+        self._feature_cache.clear()
+
+    def _close_long_device(self):
+        """关闭长报文通道，并保留 path 缓存供后续懒加载复用。"""
+        if self._long_device:
+            try:
+                self._long_device.close()
+            except Exception as e:
+                logger.debug(f"关闭罗技长报文通道失败: {e}")
+        self._long_device = None
+        self._long_feature_cache.clear()
+
+    def _resolve_long_path(self):
+        """解析长报文通道路径，并尽量缓存结果以减少重复枚举。"""
+        if self._long_path:
+            return self._long_path
+
+        all_devs = hid.enumerate(LOGITECH_VID, self.product_id)
+        for dev in all_devs:
+            if dev.get('usage_page', 0) == 0xFF00 and dev.get('usage', 0) == 0x0002:
+                self._long_path = dev['path']
+                return self._long_path
+        return None
+
+    def _ensure_long_device(self) -> Optional['hid.device']:
+        """懒加载长报文通道，避免每次读取都重新打开 HID 设备。"""
+        if self._long_device:
+            return self._long_device
+
+        try:
+            long_path = self._resolve_long_path()
+        except Exception as e:
+            logger.warning(f"枚举罗技长报文通道失败: {e}")
+            self._long_path = None
+            return None
+
+        if not long_path:
+            logger.debug(f"{self.product_string} 未找到 usage=2 的长消息通道")
+            return None
+
+        try:
+            dev = hid.device()
+            dev.open_path(long_path)
+            dev.set_nonblocking(True)
+            self._long_device = dev
+            logger.debug(f"已打开罗技长报文通道: {self.product_string}")
+            return dev
+        except Exception as e:
+            logger.warning(f"打开罗技长报文通道失败: {e}")
+            self._long_device = None
+            self._long_path = None
+            self._long_feature_cache.clear()
+            return None
 
     def _send_short(self, device_index: int, feature_index: int,
                     function: int, *params) -> Optional[bytes]:
@@ -444,6 +505,10 @@ class LogitechReceiver:
         在长消息通道上查询指定 feature 的 index。
         返回 feature index（非 0），查询失败返回 None。
         """
+        cache_key = (device_index << 16) | feature_id
+        if cache_key in self._long_feature_cache:
+            return self._long_feature_cache[cache_key]
+
         query = [HIDPP_LONG_MSG, device_index, 0x00, 0x0A,
                  (feature_id >> 8) & 0xFF, feature_id & 0xFF] + [0] * 14
         dev.write(bytes(query))
@@ -456,6 +521,7 @@ class LogitechReceiver:
                 if (len(r) >= 5 and r[0] in (HIDPP_SHORT_MSG, HIDPP_LONG_MSG)
                         and r[1] == device_index and r[2] == 0x00
                         and (r[3] & 0x0F) == 0x0A and r[4] != 0):
+                    self._long_feature_cache[cache_key] = r[4]
                     return r[4]
             time.sleep(0.01)
         return None
@@ -489,74 +555,62 @@ class LogitechReceiver:
         依次尝试 UNIFIED_BATTERY(0x1004)/BATTERY_VOLTAGE(0x1001)/BATTERY_STATUS(0x1000)。
         """
         try:
-            # 枚举该接收器的所有端点，找到 usage=2 (长消息通道)
-            all_devs = hid.enumerate(LOGITECH_VID, self.product_id)
-            long_path = None
-            for d in all_devs:
-                if d.get('usage_page', 0) == 0xFF00 and d.get('usage', 0) == 0x0002:
-                    long_path = d['path']
-                    break
-
-            if not long_path:
-                logger.debug(f"{self.product_string} 未找到 usage=2 的长消息通道")
+            # 这里使用懒加载缓存长报文通道，避免每次刷新都重新 enumerate/open。
+            dev = self._ensure_long_device()
+            if not dev:
                 return None
 
-            dev = hid.device()
-            dev.open_path(long_path)
-            dev.set_nonblocking(True)
+            # 尝试 0x1004 UNIFIED_BATTERY
+            feat_idx = self._long_query_feature_index(dev, device_index, FEATURE_UNIFIED_BATTERY)
+            if feat_idx:
+                r = self._long_read_feature(dev, device_index, feat_idx, func_hi=0x1A)
+                if r:
+                    info = BatteryInfo()
+                    info.percentage = r[4]
+                    status = r[6]
+                    if self._is_valid_percentage(info.percentage) and status in (0, 1, 2, 3, 4, 5, 6):
+                        info.charging = status in (1, 2, 3)
+                        info.status_text = "充电中" if info.charging else "放电中"
+                        logger.info(f"{self.product_string} UNIFIED_BATTERY(F1): {info.percentage}% 状态={status}")
+                        return info
+                    logger.debug(f"忽略异常 UNIFIED_BATTERY(F1) 响应: {r.hex()}")
 
-            try:
-                # 尝试 0x1004 UNIFIED_BATTERY
-                feat_idx = self._long_query_feature_index(dev, device_index, FEATURE_UNIFIED_BATTERY)
-                if feat_idx:
-                    r = self._long_read_feature(dev, device_index, feat_idx, func_hi=0x1A)
-                    if r:
+            # 尝试 0x1001 BATTERY_VOLTAGE
+            feat_idx = self._long_query_feature_index(dev, device_index, FEATURE_BATTERY_VOLTAGE)
+            if feat_idx:
+                r = self._long_read_feature(dev, device_index, feat_idx)
+                if r:
+                    voltage = (r[4] << 8) | r[5]
+                    flags = r[6]
+                    if 3000 <= voltage <= 5000:
                         info = BatteryInfo()
-                        info.percentage = r[4]
-                        status = r[6]
-                        if self._is_valid_percentage(info.percentage) and status in (0, 1, 2, 3, 4, 5, 6):
-                            info.charging = status in (1, 2, 3)
-                            info.status_text = "充电中" if info.charging else "放电中"
-                            logger.info(f"{self.product_string} UNIFIED_BATTERY(F1): {info.percentage}% 状态={status}")
-                            return info
-                        logger.debug(f"忽略异常 UNIFIED_BATTERY(F1) 响应: {r.hex()}")
+                        info.charging = (flags & 0x80) != 0
+                        info.percentage = self._voltage_to_percent(voltage)
+                        info.status_text = "充电中" if info.charging else "放电中"
+                        logger.info(f"{self.product_string} BATTERY_VOLTAGE: {voltage}mV -> {info.percentage}%")
+                        return info
+                    logger.debug(f"忽略异常 BATTERY_VOLTAGE 响应: {r.hex()}")
 
-                # 尝试 0x1001 BATTERY_VOLTAGE
-                feat_idx = self._long_query_feature_index(dev, device_index, FEATURE_BATTERY_VOLTAGE)
-                if feat_idx:
-                    r = self._long_read_feature(dev, device_index, feat_idx)
-                    if r:
-                        voltage = (r[4] << 8) | r[5]
-                        flags = r[6]
-                        if 3000 <= voltage <= 5000:
-                            info = BatteryInfo()
-                            info.charging = (flags & 0x80) != 0
-                            info.percentage = self._voltage_to_percent(voltage)
-                            info.status_text = "充电中" if info.charging else "放电中"
-                            logger.info(f"{self.product_string} BATTERY_VOLTAGE: {voltage}mV -> {info.percentage}%")
-                            return info
-                        logger.debug(f"忽略异常 BATTERY_VOLTAGE 响应: {r.hex()}")
+            # 最后尝试 0x1000 BATTERY_STATUS
+            feat_idx = self._long_query_feature_index(dev, device_index, FEATURE_BATTERY_STATUS)
+            if feat_idx:
+                r = self._long_read_feature(dev, device_index, feat_idx)
+                if r:
+                    info = BatteryInfo()
+                    info.percentage = r[4]
+                    status = r[6]
+                    if self._is_valid_percentage(info.percentage) and status in (0, 1, 2, 3, 4, 5, 6):
+                        info.charging = status in (1, 2, 3, 4)
+                        info.status_text = "充电中" if info.charging else "放电中"
+                        logger.info(f"{self.product_string} BATTERY_STATUS: {info.percentage}%")
+                        return info
+                    logger.debug(f"忽略异常 BATTERY_STATUS 响应: {r.hex()}")
 
-                # 最后尝试 0x1000 BATTERY_STATUS
-                feat_idx = self._long_query_feature_index(dev, device_index, FEATURE_BATTERY_STATUS)
-                if feat_idx:
-                    r = self._long_read_feature(dev, device_index, feat_idx)
-                    if r:
-                        info = BatteryInfo()
-                        info.percentage = r[4]
-                        status = r[6]
-                        if self._is_valid_percentage(info.percentage) and status in (0, 1, 2, 3, 4, 5, 6):
-                            info.charging = status in (1, 2, 3, 4)
-                            info.status_text = "充电中" if info.charging else "放电中"
-                            logger.info(f"{self.product_string} BATTERY_STATUS: {info.percentage}%")
-                            return info
-                        logger.debug(f"忽略异常 BATTERY_STATUS 响应: {r.hex()}")
-
-                logger.debug(f"{self.product_string}: 所有已知电量读取尝试均失败或超时")
-                return None
-            finally:
-                dev.close()
+            logger.debug(f"{self.product_string}: 所有已知电量读取尝试均失败或超时")
+            return None
         except Exception as e:
+            # 长通道出异常后主动关闭，下次刷新重新建链，避免复用脏句柄造成持续超时。
+            self._close_long_device()
             logger.warning(f"{self.product_string} 电池读取发生异常: {e}")
             return None
 
