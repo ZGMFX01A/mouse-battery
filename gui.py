@@ -15,9 +15,32 @@ from typing import Optional
 
 import flet as ft
 
-from devices import DeviceManager, MouseInfo, Brand
-from config import ConfigManager, APP_VERSION
+from devices import (
+    DeviceManager,
+    MouseInfo,
+    Brand,
+    request_device_command,
+    DEVICE_COMMAND_SCAN_KEYBOARD_CANDIDATES,
+    DEVICE_COMMAND_BIND_KEYBOARD,
+    DEVICE_COMMAND_UNBIND_KEYBOARD,
+    DEVICE_COMMAND_REFRESH_TRAY_ICON,
+)
+from core_bridge import KeyboardInfo, KeyboardCandidate
+from config import (
+    ConfigManager,
+    APP_VERSION,
+    TRAY_ICON_PRIORITY_MOUSE_FIRST,
+    TRAY_ICON_PRIORITY_KEYBOARD_FIRST,
+    TRAY_ICON_PRIORITY_LOWEST_BATTERY,
+)
 import updater
+from i18n import (
+    LANGUAGE_EN_US,
+    LANGUAGE_ZH_CN,
+    translate,
+    translate_brand_name,
+    translate_runtime_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +222,73 @@ def build_setting_row(icon_name, title: str, subtitle: str, trailing, icon_color
     )
 
 
+def build_select_box(value: str, options: list[tuple[str, str]], on_change=None) -> ft.Container:
+    """构建与设置卡片右侧列宽一致的轻量选择器。
+
+    当前项目锁定的 Flet 版本对 [`ft.Dropdown`](gui.py:216) 支持不稳定，
+    继续使用下拉框会导致初始化报错或界面异常撑开。因此这里改成
+    「单框点击轮换选项」方案：
+    - 宽度仍严格使用 [`TRAILING_WIDTH`](gui.py:81)
+    - 不引入额外弹层，避免再触发版本兼容问题
+    - 每次点击在三种优先级间循环切换
+    """
+    option_map = {key: label for key, label in options}
+    option_keys = [key for key, _ in options]
+    current_value = value if value in option_map else option_keys[0]
+
+    label_text = ft.Text(
+        option_map[current_value],
+        size=12,
+        weight=ft.FontWeight.W_600,
+        color=COLORS['text_primary'],
+        text_align=ft.TextAlign.CENTER,
+        max_lines=2,
+        overflow=ft.TextOverflow.ELLIPSIS,
+    )
+    caret_icon = ft.Icon(ft.Icons.SYNC_ALT, size=14, color=COLORS['text_secondary'])
+
+    control = ft.Container(
+        width=TRAILING_WIDTH,
+        height=42,
+        bgcolor=COLORS['bg_card_soft'],
+        border=ft.Border.all(1, COLORS['bg_line']),
+        border_radius=12,
+        padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+        content=ft.Row(
+            controls=[
+                ft.Container(content=label_text, expand=True, alignment=ft.Alignment.CENTER),
+                caret_icon,
+            ],
+            spacing=4,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        alignment=ft.Alignment.CENTER,
+    )
+
+    # 通过给容器挂载 value，保持调用方仍可像读取普通控件一样获取当前值。
+    control.value = current_value
+
+    def handle_click(e):
+        current = getattr(control, 'value', option_keys[0])
+        try:
+            current_index = option_keys.index(current)
+        except ValueError:
+            current_index = 0
+        next_value = option_keys[(current_index + 1) % len(option_keys)]
+        control.value = next_value
+        label_text.value = option_map[next_value]
+        try:
+            control.update()
+        except Exception:
+            pass
+        if on_change is not None:
+            on_change(next_value)
+
+    control.on_click = handle_click
+    return control
+
+
 def build_trailing_box(content, width: int = TRAILING_WIDTH) -> ft.Container:
     """设置项右侧统一占位：开关和数值控件共用固定列宽，右边缘稳定。"""
     return ft.Container(
@@ -208,12 +298,12 @@ def build_trailing_box(content, width: int = TRAILING_WIDTH) -> ft.Container:
     )
 
 
-def build_threshold_stepper(value: int, on_decrease=None, on_increase=None) -> ft.Container:
+def build_threshold_stepper(value: int, off_label: str = '关闭', on_decrease=None, on_increase=None) -> ft.Container:
     """
     低电量阈值调节器。
     用 - / 数值 / + 代替下拉框，避免下拉框在窄列里挤压文字，视觉上也更轻。
     """
-    label = '关闭' if value <= 0 else f'{value}%'
+    label = off_label if value <= 0 else f'{value}%'
     return ft.Container(
         width=TRAILING_WIDTH,
         height=42,
@@ -258,7 +348,8 @@ def build_action_button(content, primary: bool = False, on_click=None, expand: b
         border=ft.Border.all(1, COLORS['bg_line']),
         border_radius=12,
         alignment=ft.Alignment.CENTER,
-        padding=ft.Padding.symmetric(horizontal=14, vertical=0),
+        # 按钮内部去掉偏重的左右留白，避免视觉上出现“文字整体偏左”的错觉。
+        padding=ft.Padding.symmetric(horizontal=6, vertical=0),
         shadow=ft.BoxShadow(
             spread_radius=0,
             blur_radius=10,
@@ -292,13 +383,21 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
     else:
         dot_color = COLORS['battery_critical']
 
-    time_str = '等待更新'
+    time_str = app_ref._t('device.waiting_update') if app_ref else '等待更新'
     if mouse.last_update > 0:
-        time_str = f"更新于 {time.strftime('%H:%M:%S', time.localtime(mouse.last_update))}"
+        time_str = (
+            app_ref._t('device.updated_at', time=time.strftime('%H:%M:%S', time.localtime(mouse.last_update)))
+            if app_ref else
+            f"更新于 {time.strftime('%H:%M:%S', time.localtime(mouse.last_update))}"
+        )
+
+    brand_text = app_ref._translate_brand_name(mouse.brand.value) if app_ref else mouse.brand.value
+    name_text = app_ref._translate_runtime_text(mouse.name) if app_ref else mouse.name
+    status_text = app_ref._translate_runtime_text(mouse.status_text) if app_ref else mouse.status_text
 
     brand_badge = ft.Container(
         content=ft.Text(
-            mouse.brand.value,
+            brand_text,
             size=12,
             weight=ft.FontWeight.W_600,
             color=brand_color,
@@ -313,7 +412,7 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
         controls=[
             brand_badge,
             ft.Text(
-                mouse.name,
+                name_text,
                 size=22,
                 weight=ft.FontWeight.W_700,
                 color=COLORS['text_primary'],
@@ -323,7 +422,7 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
             ft.Row(
                 controls=[
                     build_status_dot(dot_color),
-                    ft.Text(mouse.status_text, size=14, color=COLORS['text_secondary']),
+                    ft.Text(status_text, size=14, color=COLORS['text_secondary']),
                 ],
                 spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -354,6 +453,114 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
             ],
             spacing=18,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        padding=ft.Padding.symmetric(horizontal=26, vertical=18),
+        margin=ft.Margin.only(bottom=8),
+    )
+
+
+def build_keyboard_card(keyboard: KeyboardInfo, on_remove=None, app_ref: "MouseBatteryApp" = None) -> ft.Container:
+    """构建键盘设备信息卡片，沿用鼠标卡片版式保持界面一致性。"""
+    if not keyboard.online:
+        dot_color = COLORS['offline']
+    elif keyboard.charging:
+        dot_color = COLORS['charging']
+    elif keyboard.percentage >= 20:
+        dot_color = COLORS['battery_full']
+    else:
+        dot_color = COLORS['battery_critical']
+
+    time_str = app_ref._t('device.waiting_update') if app_ref else '等待更新'
+    if keyboard.last_update > 0:
+        time_str = (
+            app_ref._t('device.updated_at', time=time.strftime('%H:%M:%S', time.localtime(keyboard.last_update)))
+            if app_ref else
+            f"更新于 {time.strftime('%H:%M:%S', time.localtime(keyboard.last_update))}"
+        )
+
+    brand_text = app_ref._translate_brand_name(keyboard.brand) if app_ref else keyboard.brand
+    name_text = app_ref._translate_runtime_text(keyboard.name) if app_ref else keyboard.name
+    status_text = app_ref._translate_runtime_text(keyboard.status_text) if app_ref else keyboard.status_text
+
+    brand_color = COLORS['accent_green_dark']
+    brand_badge = ft.Container(
+        content=ft.Text(
+            brand_text,
+            size=12,
+            weight=ft.FontWeight.W_600,
+            color=brand_color,
+        ),
+        padding=ft.Padding.symmetric(horizontal=12, vertical=5),
+        border_radius=14,
+        bgcolor=_alpha(brand_color, '10'),
+        border=ft.Border.all(1, _alpha(brand_color, '20')),
+    )
+
+    device_info = ft.Column(
+        controls=[
+            brand_badge,
+            ft.Text(
+                name_text,
+                size=22,
+                weight=ft.FontWeight.W_700,
+                color=COLORS['text_primary'],
+                max_lines=2,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            ),
+            ft.Row(
+                controls=[
+                    build_status_dot(dot_color),
+                    ft.Text(status_text, size=14, color=COLORS['text_secondary']),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            ft.Text(time_str, size=13, color=COLORS['text_dim']),
+        ],
+        spacing=10,
+        alignment=ft.MainAxisAlignment.CENTER,
+        expand=True,
+    )
+
+    remove_button = ft.Container(
+        content=ft.Icon(ft.Icons.CLOSE, size=16, color=COLORS['text_dim']),
+        width=28,
+        height=28,
+        border_radius=14,
+        alignment=ft.Alignment.CENTER,
+        bgcolor=COLORS['bg_card_soft'],
+        border=ft.Border.all(1, COLORS['bg_line']),
+        on_click=on_remove,
+    )
+
+    return build_card(
+        content=ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[ft.Container(expand=True), remove_button],
+                    spacing=0,
+                    alignment=ft.MainAxisAlignment.END,
+                ),
+                ft.Row(
+                    controls=[
+                        ft.Container(
+                            content=build_battery_bar(keyboard.percentage, keyboard.charging, width=132),
+                            expand=4,
+                            alignment=ft.Alignment.CENTER,
+                        ),
+                        ft.Container(width=1, height=112, bgcolor=COLORS['bg_line_soft']),
+                        ft.Container(
+                            content=device_info,
+                            expand=7,
+                            padding=ft.Padding.only(left=22),
+                            alignment=ft.Alignment.CENTER_LEFT,
+                        ),
+                    ],
+                    spacing=18,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ],
+            spacing=6,
         ),
         padding=ft.Padding.symmetric(horizontal=26, vertical=18),
         margin=ft.Margin.only(bottom=8),
@@ -448,9 +655,16 @@ class MouseBatteryApp:
         self.refresh_btn_row: Optional[ft.Row] = None
         self.check_update_btn: Optional[ft.Container] = None
         self.check_update_btn_row: Optional[ft.Row] = None
+        self.add_keyboard_btn: Optional[ft.Container] = None
+        self.add_keyboard_btn_row: Optional[ft.Row] = None
         self.notify_threshold_control: Optional[ft.Container] = None
+        self.tray_icon_priority_control: Optional[ft.Container] = None
         self.status_text: Optional[ft.Text] = None
         self.auto_switch: Optional[ft.Switch] = None
+        self._keyboard_dialog: Optional[ft.AlertDialog] = None
+        self._keyboard_bind_action: Optional[ft.TextButton] = None
+        self._keyboard_selected_device_id = ''
+        self._keyboard_dialog_loading = False
         # 动作按钮忙碌标记：Container.disabled 在 Flet 中无法拦截 on_click，
         # 这里用显式锁替代，避免扫描/刷新/检查更新在执行中被重复点击触发并发。
         self._scan_busy = False
@@ -464,8 +678,68 @@ class MouseBatteryApp:
         # 用渲染签名避免每次收到回调都重建整组卡片，减少 Flet 控件树抖动。
         self._last_render_signature = None
 
+    def _effective_language(self) -> str:
+        """返回当前 GUI 应使用的实际语言。"""
+        return self.config_manager.effective_ui_language
+
+    def _t(self, key: str, **kwargs) -> str:
+        """按当前语言获取 GUI 静态文案。"""
+        return translate(key, self._effective_language(), **kwargs)
+
+    def _translate_runtime_text(self, text: str) -> str:
+        """翻译运行时状态文案，避免底层中文原文直接暴露到英文界面。"""
+        return translate_runtime_text(text, self._effective_language())
+
+    def _translate_brand_name(self, name: str) -> str:
+        """翻译品牌名，保证英文界面不直接展示中文品牌值。"""
+        return translate_brand_name(name, self._effective_language())
+
+    def _request_tray_refresh(self):
+        """通知 tray 进程立即按最新配置刷新图标与菜单。"""
+        try:
+            request_device_command(DEVICE_COMMAND_REFRESH_TRAY_ICON)
+        except Exception as ex:
+            logger.error(f'提交托盘刷新命令失败: {ex}')
+
+    def _rebuild_page(self):
+        """语言切换后重建页面静态结构，确保所有文案立即生效。"""
+        if not self.page:
+            return
+
+        # 自动刷新是当前 GUI 会话级状态，不做持久化；语言切换重建页面时需要原样保留。
+        auto_refresh_enabled = bool(self.auto_switch.value) if self.auto_switch else True
+
+        self.page.controls.clear()
+        self.card_list = None
+        self.scan_btn = None
+        self.scan_btn_row = None
+        self.refresh_btn = None
+        self.refresh_btn_row = None
+        self.check_update_btn = None
+        self.check_update_btn_row = None
+        self.add_keyboard_btn = None
+        self.add_keyboard_btn_row = None
+        self.notify_threshold_control = None
+        self.tray_icon_priority_control = None
+        self.status_text = None
+        self.auto_switch = None
+        self._keyboard_dialog = None
+        self._keyboard_bind_action = None
+        self._keyboard_selected_device_id = ''
+        self._last_render_signature = None
+        self.build(self.page, initial_scan=False, auto_refresh_enabled=auto_refresh_enabled)
+
     def _on_autoupdate_toggle(self, e):
         self.config_manager.auto_update = e.control.value
+
+    def _on_language_toggle(self, e):
+        """切换中英界面，并持久化为显式语言偏好。"""
+        current = self._effective_language()
+        next_language = LANGUAGE_EN_US if current == LANGUAGE_ZH_CN else LANGUAGE_ZH_CN
+        self.config_manager.ui_language = next_language
+        logger.info(f'界面语言切换为: {next_language}')
+        self._request_tray_refresh()
+        self._rebuild_page()
 
     def _show_dialog(self, title: str, message: str, actions: list = None):
         """统一的对话框构建与弹出，减少重复代码。返回对话框对象供外部控制。"""
@@ -474,7 +748,7 @@ class MouseBatteryApp:
             self._safe_update()
 
         if actions is None:
-            actions = [ft.TextButton('确定', on_click=close_dlg)]
+            actions = [ft.TextButton(self._t('dialog.ok'), on_click=close_dlg)]
 
         dlg = ft.AlertDialog(
             title=ft.Text(title, color=COLORS['text_primary']),
@@ -525,7 +799,22 @@ class MouseBatteryApp:
         """
         state = getattr(self.device_manager, 'last_read_state', 'ok')
         message = getattr(self.device_manager, 'last_read_error', '')
-        return state, message
+        return state, self._translate_runtime_text(message)
+
+    def _keyboard_snapshot(self) -> Optional[KeyboardInfo]:
+        """弱依赖读取当前共享状态里的键盘快照。"""
+        return getattr(self.device_manager, 'keyboard', None)
+
+    def _keyboard_candidates_snapshot(self) -> list[KeyboardCandidate]:
+        """弱依赖读取共享状态里的键盘候选列表。"""
+        return list(getattr(self.device_manager, 'keyboard_candidates', []) or [])
+
+    def _keyboard_scan_state(self) -> tuple[str, str]:
+        """读取键盘候选枚举状态，驱动弹窗加载/错误/列表展示。"""
+        return (
+            getattr(self.device_manager, 'keyboard_scan_state', 'idle'),
+            self._translate_runtime_text(getattr(self.device_manager, 'keyboard_scan_message', '')),
+        )
 
     def _device_signature(self, mice: list[MouseInfo]):
         """生成当前设备列表的轻量签名，用于判断是否需要整列表重建。"""
@@ -542,33 +831,54 @@ class MouseBatteryApp:
             for mouse in mice
         )
 
-    def _build_device_view_controls(self, mice: list[MouseInfo]):
+    @staticmethod
+    def _keyboard_signature(keyboard: Optional[KeyboardInfo]):
+        """生成键盘快照签名，避免键盘状态变化时界面不刷新。"""
+        if keyboard is None:
+            return None
+        return (
+            keyboard.name,
+            keyboard.percentage,
+            keyboard.charging,
+            keyboard.status_text,
+            keyboard.online,
+            round(keyboard.last_update, 2),
+            keyboard.device_id,
+        )
+
+    def _build_device_view_controls(self, mice: list[MouseInfo], keyboard: Optional[KeyboardInfo]):
         """根据当前界面状态构建设备列表区域控件。"""
-        if mice:
-            return [build_mouse_card(mouse) for mouse in mice]
+        if mice or keyboard:
+            controls = [build_mouse_card(mouse, app_ref=self) for mouse in mice]
+            if keyboard is not None:
+                controls.append(build_keyboard_card(keyboard, on_remove=self._on_remove_keyboard_click, app_ref=self))
+            return controls
 
         if self._view_state == 'loading':
             return [build_empty_state(
-                title='正在同步设备状态',
-                message=self._view_message or '正在从托盘进程读取最新电量信息，请稍候…',
+                title=self._t('view.loading.title'),
+                message=self._view_message or self._t('view.loading.message'),
                 icon_name=ft.Icons.SYNC,
             )]
 
         if self._view_state == 'error':
             return [build_empty_state(
-                title='读取设备状态失败',
-                message=self._view_message or '请确认托盘进程仍在运行，然后点击“刷新电量”重试。',
+                title=self._t('view.error.title'),
+                message=self._view_message or self._t('view.error.message'),
                 icon_name=ft.Icons.ERROR_OUTLINE,
             )]
 
         if self._view_state == 'empty' and self._view_message:
             return [build_empty_state(
-                title='尚未同步到设备状态',
+                title=self._t('view.not_synced.title'),
                 message=self._view_message,
                 icon_name=ft.Icons.SYNC,
             )]
 
-        return [build_empty_state()]
+        return [build_empty_state(
+            title=self._t('view.empty.default_title'),
+            message=self._t('view.empty.default_message'),
+        )]
 
     def _sync_action_buttons(self):
         """统一同步扫描/刷新按钮的禁用态与文案，避免不同分支各自恢复状态。"""
@@ -581,24 +891,203 @@ class MouseBatteryApp:
             self.refresh_btn.disabled = refresh_disabled
 
         if self._scan_busy:
-            self._update_btn_content(self.scan_btn_row, ft.Icons.HOURGLASS_TOP, '扫描中...')
+            self._update_btn_content(self.scan_btn_row, ft.Icons.HOURGLASS_TOP, self._t('action.scan_loading'))
         else:
-            self._set_btn_disabled_visual(self.scan_btn_row, scan_disabled, ft.Icons.SEARCH, '扫描设备')
+            self._set_btn_disabled_visual(self.scan_btn_row, scan_disabled, ft.Icons.SEARCH, self._t('action.scan'))
 
         if self._refresh_busy:
-            self._update_btn_content(self.refresh_btn_row, ft.Icons.HOURGLASS_TOP, '刷新中...')
+            self._update_btn_content(self.refresh_btn_row, ft.Icons.HOURGLASS_TOP, self._t('action.refresh_loading'))
         else:
-            self._set_btn_disabled_visual(self.refresh_btn_row, refresh_disabled, ft.Icons.REFRESH, '刷新电量')
+            self._set_btn_disabled_visual(self.refresh_btn_row, refresh_disabled, ft.Icons.REFRESH, self._t('action.refresh'))
 
-    def _status_bar_message(self, mice: list[MouseInfo]) -> str:
+    def _status_bar_message(self, mice: list[MouseInfo], keyboard: Optional[KeyboardInfo]) -> str:
         """根据当前视图状态生成底部状态栏文案。"""
         if self._view_state == 'loading':
-            return self._view_message or '正在同步设备状态...'
+            return self._view_message or self._t('status.syncing')
         if self._view_state == 'error':
-            return self._view_message or '读取设备状态失败'
+            return self._view_message or self._t('status.read_failed')
         if self._view_state == 'ready' and self._view_message:
             return self._view_message
-        return f'已发现 {len(mice)} 个设备' if mice else '未发现设备'
+        total = len(mice) + (1 if keyboard else 0)
+        return self._t('status.devices_found', count=total) if total else self._t('status.no_devices')
+
+    def _on_tray_icon_priority_change(self, value: str):
+        """保存托盘图标显示逻辑，立即持久化给 tray 进程读取。"""
+        self.config_manager.tray_icon_priority = value
+        # 仅保存配置还不够：tray 进程只有在收到一次更新回调后才会重算图标。
+        # 这里显式发出“刷新托盘图标”命令，让用户切换后立即看到图标变化。
+        self._request_tray_refresh()
+
+    def _on_keyboard_candidate_change(self, e):
+        """记录当前弹窗里用户选中的键盘候选项。"""
+        self._keyboard_selected_device_id = e.control.value or ''
+
+    def _on_remove_keyboard_click(self, e):
+        """点击键盘卡片右上角 X 后，解除当前键盘绑定。"""
+        dialog_holder = {'dialog': None}
+
+        def close_confirm(evt):
+            dialog = dialog_holder['dialog']
+            if dialog:
+                dialog.open = False
+            self._safe_update()
+
+        def confirm_remove(evt):
+            try:
+                request_device_command(DEVICE_COMMAND_UNBIND_KEYBOARD)
+            except Exception as ex:
+                logger.error(f'提交解除键盘绑定命令失败: {ex}')
+                self._show_dialog(
+                    self._t('keyboard.remove.failed.title'),
+                    self._t('keyboard.remove.failed.message', error=ex),
+                )
+                return
+            close_confirm(evt)
+
+        dialog_holder['dialog'] = self._show_dialog(
+            self._t('keyboard.remove.title'),
+            self._t('keyboard.remove.message'),
+            actions=[
+                ft.TextButton(self._t('dialog.remove'), on_click=confirm_remove),
+                ft.TextButton(self._t('dialog.cancel'), on_click=close_confirm),
+            ],
+        )
+
+    def _close_keyboard_dialog(self, e=None):
+        """关闭键盘选择弹窗，并清理本轮交互状态。"""
+        if self._keyboard_dialog:
+            self._keyboard_dialog.open = False
+        self._keyboard_bind_action = None
+        self._keyboard_dialog_loading = False
+        self._safe_update()
+
+    def _build_keyboard_dialog_content(self):
+        """根据共享状态动态构建键盘选择弹窗内容。"""
+        scan_state, scan_message = self._keyboard_scan_state()
+        candidates = self._keyboard_candidates_snapshot()
+        keyboard = self._keyboard_snapshot()
+
+        if not self._keyboard_selected_device_id:
+            if keyboard and keyboard.device_id:
+                self._keyboard_selected_device_id = keyboard.device_id
+            elif candidates:
+                self._keyboard_selected_device_id = candidates[0].device_id
+
+        if self._keyboard_dialog_loading or scan_state == 'loading':
+            return ft.Column(
+                controls=[
+                    ft.ProgressRing(width=26, height=26, color=COLORS['accent_green']),
+                    ft.Text(scan_message or self._t('keyboard.dialog.loading'), size=13, color=COLORS['text_secondary']),
+                ],
+                tight=True,
+                spacing=14,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+        if not candidates:
+            return ft.Column(
+                controls=[
+                    ft.Text(self._t('keyboard.dialog.empty_title'), size=15, weight=ft.FontWeight.W_600, color=COLORS['text_primary']),
+                    ft.Text(
+                        scan_message or self._t('keyboard.dialog.empty_message'),
+                        size=13,
+                        color=COLORS['text_secondary'],
+                    ),
+                ],
+                tight=True,
+                spacing=10,
+            )
+
+        group = ft.RadioGroup(
+            value=self._keyboard_selected_device_id,
+            on_change=self._on_keyboard_candidate_change,
+            content=ft.Column(
+                controls=[
+                    ft.Radio(
+                        value=candidate.device_id,
+                        label=(
+                            self._t('keyboard.dialog.current_bound_option', name=candidate.display_name)
+                            if keyboard and keyboard.device_id == candidate.device_id
+                            else candidate.display_name
+                        ),
+                    )
+                    for candidate in candidates
+                ],
+                tight=True,
+                spacing=10,
+            ),
+        )
+
+        return ft.Column(
+            controls=[
+                ft.Text(
+                    self._t('keyboard.dialog.helper'),
+                    size=13,
+                    color=COLORS['text_secondary'],
+                ),
+                group,
+            ],
+            tight=True,
+            spacing=12,
+        )
+
+    def _refresh_keyboard_dialog(self):
+        """在共享状态变化后刷新已打开的键盘选择弹窗。"""
+        if not self._keyboard_dialog or not self._keyboard_dialog.open:
+            return
+        candidates = self._keyboard_candidates_snapshot()
+        scan_state, _ = self._keyboard_scan_state()
+        if scan_state != 'loading':
+            self._keyboard_dialog_loading = False
+        self._keyboard_dialog.content = self._build_keyboard_dialog_content()
+        if self._keyboard_bind_action:
+            self._keyboard_bind_action.disabled = self._keyboard_dialog_loading or scan_state == 'loading' or not candidates
+
+    def _on_bind_keyboard_click(self, e):
+        """提交键盘绑定请求，由 tray 进程保存配置并刷新键盘电量。"""
+        device_id = self._keyboard_selected_device_id.strip()
+        if not device_id:
+            self._show_dialog(self._t('keyboard.select_required.title'), self._t('keyboard.select_required.message'))
+            return
+
+        try:
+            request_device_command(DEVICE_COMMAND_BIND_KEYBOARD, {'device_id': device_id})
+        except Exception as ex:
+            logger.error(f'提交键盘绑定命令失败: {ex}')
+            self._show_dialog(self._t('keyboard.bind.failed.title'), self._t('keyboard.bind.failed.message', error=ex))
+            return
+
+        self._close_keyboard_dialog()
+
+    def _open_keyboard_picker_dialog(self):
+        """打开键盘选择弹窗，并等待 tray 进程回填候选列表。"""
+        self._keyboard_bind_action = ft.TextButton(self._t('dialog.connect'), on_click=self._on_bind_keyboard_click)
+        dialog = ft.AlertDialog(
+            title=ft.Text(self._t('keyboard.select.title'), color=COLORS['text_primary']),
+            content=self._build_keyboard_dialog_content(),
+            actions=[
+                self._keyboard_bind_action,
+                ft.TextButton(self._t('dialog.cancel'), on_click=self._close_keyboard_dialog),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            shape=ft.RoundedRectangleBorder(radius=14),
+        )
+        self._keyboard_dialog = dialog
+        self._refresh_keyboard_dialog()
+        self.page.show_dialog(dialog)
+
+    def _on_add_keyboard_click(self, e):
+        """请求 tray 进程枚举键盘候选接口，并弹出选择对话框。"""
+        self._keyboard_dialog_loading = True
+        try:
+            request_device_command(DEVICE_COMMAND_SCAN_KEYBOARD_CANDIDATES)
+        except Exception as ex:
+            self._keyboard_dialog_loading = False
+            logger.error(f'提交键盘扫描命令失败: {ex}')
+            self._show_dialog(self._t('keyboard.add.failed.title'), self._t('keyboard.add.failed.message', error=ex))
+            return
+        self._keyboard_selected_device_id = ''
+        self._open_keyboard_picker_dialog()
 
     def _on_check_update_click(self, e):
         """检查版本更新。
@@ -613,7 +1102,7 @@ class MouseBatteryApp:
 
         btn = e.control
         original_content = getattr(btn, 'content', None)
-        btn.content = self._make_btn_content(ft.Icons.HOURGLASS_TOP, '检查中...', color=COLORS['text_primary'])
+        btn.content = self._make_btn_content(ft.Icons.HOURGLASS_TOP, self._t('action.check_update_loading'), color=COLORS['text_primary'])
         self._safe_update()
 
         done_event = threading.Event()
@@ -634,19 +1123,19 @@ class MouseBatteryApp:
                 threading.Thread(target=check, daemon=True).start()
                 finished = done_event.wait(timeout=10)
 
-                btn.content = original_content or self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, '检查更新', color=COLORS['text_primary'])
+                btn.content = original_content or self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, self._t('action.check_update'), color=COLORS['text_primary'])
                 self._safe_update()
 
                 if not finished:
                     self._safe_show_helper(lambda: self._show_dialog(
-                        '网络超时', '检查更新超时，请检查网络连接后重试。'
+                        self._t('update.timeout.title'), self._t('update.timeout.message')
                     ))
                     return
 
                 if result_holder[0] is None:
                     # 防御：结果未填充，视作网络故障
                     self._safe_show_helper(lambda: self._show_dialog(
-                        '网络故障', '检查更新失败，未获得有效响应。'
+                        self._t('update.network_error.title'), self._t('update.network_error.empty_response')
                     ))
                     return
 
@@ -655,17 +1144,17 @@ class MouseBatteryApp:
                     self._safe_show_helper(lambda: self._show_update_dialog(latest, url, body))
                 else:
                     if latest:
-                        msg = f'当前版本 {APP_VERSION} 已经是最新版！'
-                        title = '版本检查'
+                        msg = self._t('update.latest.message', version=APP_VERSION)
+                        title = self._t('update.version_check.title')
                     else:
-                        msg = f'检查更新失败，请检查网络设置。\n错误信息: {body}'
-                        title = '网络故障'
+                        msg = self._t('update.network_error.message', error=body)
+                        title = self._t('update.network_error.title')
                     self._safe_show_helper(lambda: self._show_dialog(title, msg))
             except Exception as ex:
                 logger.error(f'检查更新 watchdog 异常: {ex}')
                 # 兜底恢复：任何异常都要让按钮回到可点击状态
                 try:
-                    btn.content = original_content or self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, '检查更新', color=COLORS['text_primary'])
+                    btn.content = original_content or self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, self._t('action.check_update'), color=COLORS['text_primary'])
                     self._safe_update()
                 except Exception:
                     pass
@@ -686,7 +1175,7 @@ class MouseBatteryApp:
 
     def _show_update_dialog(self, version: str, url: str, body: str):
         pb = ft.ProgressBar(width=400, color=COLORS['accent_green'], bgcolor=COLORS['bg_line'], value=0)
-        status_txt = ft.Text(f'准备升级到 {version}...', color=COLORS['text_secondary'], size=12)
+        status_txt = ft.Text(self._t('update.prepare', version=version), color=COLORS['text_secondary'], size=12)
 
         def do_update(e):
             dialog.actions[0].disabled = True
@@ -699,7 +1188,7 @@ class MouseBatteryApp:
                 if pct != last_pct[0]:
                     last_pct[0] = pct
                     pb.value = pct / 100.0
-                    status_txt.value = f'正在下载... {pct}%'
+                    status_txt.value = self._t('update.downloading', percent=pct)
                     self._safe_update()
 
             def worker():
@@ -710,7 +1199,7 @@ class MouseBatteryApp:
 
                 success = updater.download_and_install(url, progress, host_pid=host_pid)
                 if not success:
-                    status_txt.value = '更新失败或仍在调试环境中，请直接去 GitHub 下载'
+                    status_txt.value = self._t('update.failed_or_debug')
                     dialog.actions[1].disabled = False
                     self._safe_update()
 
@@ -721,9 +1210,9 @@ class MouseBatteryApp:
             self._safe_update()
 
         dialog = ft.AlertDialog(
-            title=ft.Text(f'发现新版本 {version}', color=COLORS['text_primary']),
+            title=ft.Text(self._t('update.new_version.title', version=version), color=COLORS['text_primary']),
             content=ft.Column([
-                ft.Text('发版更新记录：', size=13, color=COLORS['text_primary']),
+                ft.Text(self._t('update.release_notes'), size=13, color=COLORS['text_primary']),
                 ft.Container(
                     content=ft.Text(body, size=12, color=COLORS['text_secondary'], selectable=True),
                     height=100,
@@ -733,8 +1222,8 @@ class MouseBatteryApp:
                 pb,
             ], tight=True, scroll=ft.ScrollMode.AUTO),
             actions=[
-                ft.TextButton('立即热更新', on_click=do_update),
-                ft.TextButton('稍后', on_click=close_dialog),
+                ft.TextButton(self._t('update.install_now'), on_click=do_update),
+                ft.TextButton(self._t('update.later'), on_click=close_dialog),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
             shape=ft.RoundedRectangleBorder(radius=14),
@@ -751,11 +1240,12 @@ class MouseBatteryApp:
                 ft.Text(label, size=14, weight=ft.FontWeight.W_500, color=text_color),
             ],
             spacing=8,
+            tight=True,
             alignment=ft.MainAxisAlignment.CENTER,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    def build(self, page: ft.Page):
+    def build(self, page: ft.Page, initial_scan: bool = True, auto_refresh_enabled: bool = True):
         """
         构建主界面（浅色极简风格）。
         从上到下：头部 → 电量卡片 → 设置卡片 → 操作按钮 → 设备状态栏。
@@ -763,14 +1253,15 @@ class MouseBatteryApp:
         self.page = page
 
         # —— 窗口配置 ——
-        page.title = '鼠标电量监控'
+        page.title = self._t('app.window_title')
         ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.ico')
         if os.path.exists(ico_path):
             page.window.icon = ico_path
         page.window.width = 520
-        page.window.height = 720
+        # 增加默认高度，并配合滚动容器，避免用户首次打开时看不到底部区域。
+        page.window.height = 860
         page.window.min_width = 460
-        page.window.min_height = 700
+        page.window.min_height = 780
         page.bgcolor = COLORS['bg_app']
         page.padding = 0
         page.theme_mode = ft.ThemeMode.LIGHT
@@ -809,8 +1300,8 @@ class MouseBatteryApp:
                     header_icon,
                     ft.Column(
                         controls=[
-                            ft.Text('鼠标电量监控', size=24, weight=ft.FontWeight.W_700, color=COLORS['text_primary']),
-                            ft.Text('实时查看无线鼠标电量', size=14, color=COLORS['text_secondary']),
+                            ft.Text(self._t('app.header_title'), size=24, weight=ft.FontWeight.W_700, color=COLORS['text_primary']),
+                            ft.Text(self._t('app.header_subtitle'), size=14, color=COLORS['text_secondary']),
                         ],
                         spacing=6,
                         alignment=ft.MainAxisAlignment.CENTER,
@@ -832,32 +1323,51 @@ class MouseBatteryApp:
         self.status_text = ft.Text('', size=13, color=COLORS['text_secondary'])
 
         # 扫描按钮 — 主操作
-        self.scan_btn_row = self._make_btn_content(ft.Icons.SEARCH, '扫描设备', color=COLORS['text_primary'])
+        self.scan_btn_row = self._make_btn_content(ft.Icons.SEARCH, self._t('action.scan'), color=COLORS['text_primary'])
         self.scan_btn = build_action_button(self.scan_btn_row, primary=False, on_click=self._on_scan_click)
 
         # 刷新按钮 — 次操作
-        self.refresh_btn_row = self._make_btn_content(ft.Icons.REFRESH, '刷新电量', color=COLORS['text_primary'])
+        self.refresh_btn_row = self._make_btn_content(ft.Icons.REFRESH, self._t('action.refresh'), color=COLORS['text_primary'])
         self.refresh_btn = build_action_button(self.refresh_btn_row, primary=False, on_click=self._on_refresh_click)
 
         # 检查更新按钮 — 次操作
-        self.check_update_btn_row = self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, '检查更新', color=COLORS['text_primary'])
+        self.check_update_btn_row = self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, self._t('action.check_update'), color=COLORS['text_primary'])
         self.check_update_btn = build_action_button(self.check_update_btn_row, primary=False, on_click=self._on_check_update_click)
+
+        # 新增键盘按钮：仅负责触发 tray 侧的候选枚举和绑定流程。
+        self.add_keyboard_btn_row = self._make_btn_content(ft.Icons.KEYBOARD_OUTLINED, self._t('action.add_keyboard'), color=COLORS['text_primary'])
+        self.add_keyboard_btn = build_action_button(self.add_keyboard_btn_row, primary=False, on_click=self._on_add_keyboard_click)
 
         # 自动刷新开关：会话级开关，默认开启。
         # 故意不持久化：与「开机自启」「自动检查更新」不同，此项控制的是当前 GUI 会话内
         # 是否周期刷新电量，重启后恢复默认开启更符合「插上鼠标就想看电量」的预期。
         # 切换会即时 start_auto_refresh(60)/stop_auto_refresh()，首次启动由 _start_scan 兜底开启。
         self.auto_switch = ft.Switch(
-            value=True,
+            value=auto_refresh_enabled,
             active_color=COLORS['accent_green'],
             on_change=self._on_auto_toggle,
+        )
+
+        # 语言切换按钮固定放在设置卡片标题右侧。
+        # 业务目的：不额外占用设置项行，让用户在进入设置后即可一眼发现语言入口。
+        language_toggle = ft.Container(
+            content=ft.Icon(ft.Icons.LANGUAGE, color=COLORS['text_secondary'], size=18),
+            width=36,
+            height=36,
+            border_radius=10,
+            bgcolor=COLORS['bg_card_soft'],
+            border=ft.Border.all(1, COLORS['bg_line']),
+            alignment=ft.Alignment.CENTER,
+            on_click=self._on_language_toggle,
         )
 
         # ========= 设置面板 =========
         settings_title = ft.Row(
             controls=[
                 ft.Icon(ft.Icons.SETTINGS_OUTLINED, color=COLORS['text_secondary'], size=24),
-                ft.Text('设置', size=20, weight=ft.FontWeight.W_700, color=COLORS['text_primary']),
+                ft.Text(self._t('settings.title'), size=20, weight=ft.FontWeight.W_700, color=COLORS['text_primary']),
+                ft.Container(expand=True),
+                language_toggle,
             ],
             spacing=12,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -871,6 +1381,7 @@ class MouseBatteryApp:
 
         self.notify_threshold_control = build_threshold_stepper(
             self.config_manager.low_battery_notify,
+            off_label=self._t('settings.off'),
             on_decrease=self._on_notify_decrease,
             on_increase=self._on_notify_increase,
         )
@@ -881,6 +1392,16 @@ class MouseBatteryApp:
             on_change=self._on_autoupdate_toggle,
         )
 
+        self.tray_icon_priority_control = build_select_box(
+            self.config_manager.tray_icon_priority,
+            [
+                (TRAY_ICON_PRIORITY_MOUSE_FIRST, self._t('settings.tray_priority.mouse_first')),
+                (TRAY_ICON_PRIORITY_KEYBOARD_FIRST, self._t('settings.tray_priority.keyboard_first')),
+                (TRAY_ICON_PRIORITY_LOWEST_BATTERY, self._t('settings.tray_priority.lowest_battery')),
+            ],
+            on_change=self._on_tray_icon_priority_change,
+        )
+
         settings_card = build_card(
             content=ft.Column(
                 controls=[
@@ -888,21 +1409,27 @@ class MouseBatteryApp:
                     ft.Container(height=1, bgcolor=COLORS['bg_line'], margin=ft.Margin.only(top=6, bottom=4)),
                     build_setting_row(
                         ft.Icons.POWER_SETTINGS_NEW,
-                        '开机自动启动',
-                        '跟随 Windows 启动，在后台静默运行',
+                        self._t('settings.autostart.title'),
+                        self._t('settings.autostart.subtitle'),
                         build_trailing_box(autostart_switch),
                     ),
                     build_setting_row(
+                        ft.Icons.SYNC,
+                        self._t('settings.auto_update.title', version=APP_VERSION),
+                        self._t('settings.auto_update.subtitle'),
+                        build_trailing_box(auto_update_switch),
+                    ),
+                    build_setting_row(
                         ft.Icons.NOTIFICATIONS_NONE_OUTLINED,
-                        '低电量提醒',
-                        '系统右下角弹出通知，阶梯防漏式告警',
+                        self._t('settings.low_battery.title'),
+                        self._t('settings.low_battery.subtitle'),
                         build_trailing_box(self.notify_threshold_control),
                     ),
                     build_setting_row(
-                        ft.Icons.SYNC,
-                        f'自动检查更新 · 当前 {APP_VERSION}',
-                        '启动时自动下载新版本并静默升级',
-                        build_trailing_box(auto_update_switch),
+                        ft.Icons.MONITOR_OUTLINED,
+                        self._t('settings.tray_priority.title'),
+                        self._t('settings.tray_priority.subtitle'),
+                        build_trailing_box(self.tray_icon_priority_control),
                     ),
                 ],
                 spacing=6,
@@ -916,6 +1443,7 @@ class MouseBatteryApp:
             controls=[
                 self.scan_btn,
                 self.refresh_btn,
+                self.add_keyboard_btn,
                 self.check_update_btn,
             ],
             spacing=12,
@@ -938,7 +1466,7 @@ class MouseBatteryApp:
                     # 自动刷新文字和开关组成紧凑组，避免右侧空白过大。
                     ft.Row(
                         controls=[
-                            ft.Text('自动刷新', size=13, color=COLORS['text_secondary']),
+                            ft.Text(self._t('status.auto_refresh'), size=13, color=COLORS['text_secondary']),
                             ft.Container(width=70, content=self.auto_switch, alignment=ft.Alignment.CENTER),
                         ],
                         spacing=0,
@@ -974,11 +1502,11 @@ class MouseBatteryApp:
                     author_info,
                 ],
                 spacing=10,
-                scroll=None,
-                expand=False,
+                scroll=ft.ScrollMode.AUTO,
+                expand=True,
             ),
             padding=ft.Padding.only(left=28, right=28, bottom=12),
-            expand=False,
+            expand=True,
         )
 
         page.add(
@@ -992,9 +1520,12 @@ class MouseBatteryApp:
             )
         )
 
-        # 首次扫描
-        self._set_view_state('loading', '正在从托盘进程读取设备状态...')
-        self._start_scan()
+        if initial_scan:
+            # 首次扫描
+            self._set_view_state('loading', self._t('status.syncing'))
+            self._start_scan()
+        else:
+            self._refresh_ui(force_rebuild=True)
 
     def _update_btn_content(self, btn_row: ft.Row, icon_name, label: str):
         """更新按钮内容。"""
@@ -1017,7 +1548,7 @@ class MouseBatteryApp:
         # GUI 进程只会从共享状态文件同步数据；当当前还没有可展示快照时，
         # 直接切到加载态占位，避免底部状态栏显示“正在扫描”但主体区域仍是旧空态。
         if not self.device_manager.mice:
-            self._set_view_state('loading', '正在从托盘进程同步设备状态...')
+            self._set_view_state('loading', self._t('status.syncing'))
         self._refresh_ui(force_rebuild=True)
 
         def worker():
@@ -1027,7 +1558,7 @@ class MouseBatteryApp:
                     self.device_manager.start_auto_refresh(self._GUI_STATE_REFRESH_INTERVAL)
             except Exception as ex:
                 logger.error(f'扫描设备异常: {ex}')
-                self._set_view_state('error', '同步设备状态失败，请确认托盘进程仍在运行。')
+                self._set_view_state('error', self._t('view.error.message'))
                 self._refresh_ui(force_rebuild=True)
             finally:
                 self._scan_busy = False
@@ -1047,15 +1578,16 @@ class MouseBatteryApp:
             return
 
         mice = self.device_manager.mice
+        keyboard = self._keyboard_snapshot()
         read_state, read_message = self._shared_state_read_status()
 
         if read_state == 'error':
-            if mice:
+            if mice or keyboard:
                 # 已有旧快照时保留设备卡片，但需要在状态栏显式提示当前数据可能不是最新的。
                 self._set_view_state('ready', read_message)
             else:
                 self._set_view_state('error', read_message)
-        elif mice:
+        elif mice or keyboard:
             self._set_view_state('ready')
         elif read_state == 'missing':
             # 缺失共享状态文件不再无限停留在 loading；首轮读取后明确展示“尚未同步”。
@@ -1063,17 +1595,24 @@ class MouseBatteryApp:
         elif self._view_state not in ('loading', 'error'):
             self._set_view_state('empty')
 
-        render_signature = (self._view_state, self._view_message, self._device_signature(mice))
+        render_signature = (
+            self._view_state,
+            self._view_message,
+            self._device_signature(mice),
+            self._keyboard_signature(keyboard),
+        )
         if force_rebuild or self._last_render_signature != render_signature:
             self.card_list.controls.clear()
-            self.card_list.controls.extend(self._build_device_view_controls(mice))
+            self.card_list.controls.extend(self._build_device_view_controls(mice, keyboard))
             self._last_render_signature = render_signature
+
+        self._refresh_keyboard_dialog()
 
         # 按钮状态由统一入口恢复，避免扫描/刷新/自动更新互相覆盖文案。
         self._sync_action_buttons()
 
         if self.status_text:
-            self.status_text.value = self._status_bar_message(mice)
+            self.status_text.value = self._status_bar_message(mice, keyboard)
 
         self._safe_update()
 
@@ -1091,7 +1630,7 @@ class MouseBatteryApp:
             return
         self._refresh_busy = True
         if not self.device_manager.mice:
-            self._set_view_state('loading', '正在刷新共享状态，请稍候...')
+            self._set_view_state('loading', self._t('status.syncing'))
         self._refresh_ui(force_rebuild=not self.device_manager.mice)
 
         def worker():
@@ -1101,7 +1640,7 @@ class MouseBatteryApp:
                 logger.error(f'刷新电量异常: {ex}')
                 # 没有现成设备快照时，错误态要在主体区域可见；
                 # 若已有旧快照，则保留卡片，仅更新底部状态文案即可。
-                self._set_view_state('error', '刷新失败，请稍后重试或重新打开设置窗口。')
+                self._set_view_state('error', self._t('view.error.message'))
                 self._refresh_ui(force_rebuild=not self.device_manager.mice)
             finally:
                 self._refresh_busy = False
@@ -1134,6 +1673,7 @@ class MouseBatteryApp:
         if self.notify_threshold_control:
             self.notify_threshold_control.content = build_threshold_stepper(
                 value,
+                off_label=self._t('settings.off'),
                 on_decrease=self._on_notify_decrease,
                 on_increase=self._on_notify_increase,
             ).content

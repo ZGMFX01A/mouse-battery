@@ -89,6 +89,37 @@ def check_admin():
         return False
 
 
+def run_smoke_test() -> int:
+    """执行最小 frozen/source 启动烟雾验证。
+
+    这个模式刻意不打开托盘、不扫描 HID、不拉起 GUI，
+    只验证以下关键链路是否还能完成最小初始化：
+    - 公开壳入口可启动
+    - 私有核心桥接层可导入
+    - 配置管理器与设备管理器可完成轻量初始化
+
+    这样可以把验证目标聚焦在“打包产物是否缺模块/导入即崩”，
+    而不是把硬件环境差异混进 smoke test 结果里。
+    """
+    try:
+        import core_bridge  # noqa: F401  # 显式验证私有核心桥接层可导入
+
+        config_manager = ConfigManager()
+        device_manager = DeviceManager(config_manager=config_manager)
+
+        logging.getLogger(__name__).info(
+            "smoke test passed: bridge/config/device-manager initialized"
+        )
+
+        # smoke test 不触碰 HID，但仍显式释放管理器，
+        # 保持这个模式与主程序退出路径的资源语义一致。
+        device_manager.shutdown()
+        return 0
+    except Exception as e:
+        logging.getLogger(__name__).error(f"smoke test failed: {type(e).__name__}: {e}")
+        return 1
+
+
 _settings_processes = []
 
 
@@ -222,6 +253,11 @@ if __name__ == '__main__':
     setup_logging()
     logger = logging.getLogger(__name__)
 
+    # `--smoke-test` 用于 CI / 本地打包后的最小启动验证：
+    # 只检查导入与轻量初始化是否通过，不进入单实例、托盘或 GUI 主流程。
+    if len(sys.argv) > 1 and sys.argv[1] == '--smoke-test':
+        sys.exit(run_smoke_test())
+
     # 如果带有 --gui 参数，则启动 Flet GUI 设置页面
     if len(sys.argv) > 1 and sys.argv[1] == '--gui':
         if not acquire_single_instance("Global\\MouseBattery_GUI_SingleInstance"):
@@ -246,9 +282,9 @@ if __name__ == '__main__':
     if not check_admin():
         logger.warning("未以管理员身份运行，可能无法访问部分 HID 设备")
 
-    # 初始化设备管理器与配置管理器
-    device_manager = DeviceManager()
+    # 初始化配置管理器，再注入设备管理器，确保 tray 与设备层共用同一份配置对象。
     config_manager = ConfigManager()
+    device_manager = DeviceManager(config_manager=config_manager)
 
     # 以托盘模式启动（阻塞）
     tray = TrayApp(

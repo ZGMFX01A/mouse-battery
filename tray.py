@@ -21,8 +21,15 @@ import pystray
 from pystray import MenuItem, Menu
 
 from devices import DeviceManager, MouseInfo, Brand
-from config import ConfigManager, APP_VERSION
+from config import (
+    ConfigManager,
+    APP_VERSION,
+    TRAY_ICON_PRIORITY_MOUSE_FIRST,
+    TRAY_ICON_PRIORITY_KEYBOARD_FIRST,
+    TRAY_ICON_PRIORITY_LOWEST_BATTERY,
+)
 import updater
+from i18n import translate, translate_brand_name, translate_runtime_text
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +166,22 @@ class TrayApp:
         self._running = False
         self._stopping = False
 
+    def _effective_language(self) -> str:
+        """返回当前 tray 应采用的实际语言。"""
+        return self.config_manager.effective_ui_language
+
+    def _t(self, key: str, **kwargs) -> str:
+        """按当前语言获取托盘静态文案。"""
+        return translate(key, self._effective_language(), **kwargs)
+
+    def _translate_runtime_text(self, text: str) -> str:
+        """翻译运行时状态文案，避免英文模式仍展示中文状态。"""
+        return translate_runtime_text(text, self._effective_language())
+
+    def _translate_brand_name(self, name: str) -> str:
+        """翻译品牌名，保持菜单与 tooltip 语言一致。"""
+        return translate_brand_name(name, self._effective_language())
+
     def start(self):
         """启动托盘图标（阻塞，主线程）"""
         self._running = True
@@ -167,12 +190,13 @@ class TrayApp:
         self._tray = pystray.Icon(
             name="MouseBattery",
             icon=create_battery_icon(-1),
-            title="鼠标电量监控\n正在扫描...",
+            title=f"{self._t('tray.app_name')}\n{self._t('tray.scanning')}",
             menu=self._build_menu(),
         )
 
         def boot():
             time.sleep(0.5)
+            self.device_manager.start_command_listener()
             self.device_manager.scan_and_refresh()
             self.device_manager.start_auto_refresh(60)
 
@@ -221,22 +245,24 @@ class TrayApp:
         if not self._tray:
             return
         mice = self.device_manager.mice
-        if not mice:
+        keyboard = self.device_manager.keyboard
+        if not mice and not keyboard:
             self._tray.icon = create_battery_icon(-1)
-            self._tray.title = "鼠标电量监控\n未发现设备或已休眠"
+            self._tray.title = f"{self._t('tray.app_name')}\n{self._t('tray.no_device_or_sleep')}"
         else:
             valid_mice = [m for m in mice if m.percentage >= 0]
-            if not valid_mice:
+            valid_keyboard = keyboard if keyboard and keyboard.percentage >= 0 else None
+            icon_target = self._select_icon_target(valid_mice, valid_keyboard)
+            if not icon_target:
                 self._tray.icon = create_battery_icon(-1)
             else:
-                low = min(valid_mice, key=lambda m: m.percentage)
-                self._tray.icon = create_battery_icon(low.percentage, low.charging)
+                self._tray.icon = create_battery_icon(icon_target['percentage'], icon_target['charging'])
 
-            lines = ["鼠标电量监控"]
+            lines = [self._t('tray.app_name')]
             for m in mice:
                 p = f"{m.percentage}%" if m.percentage >= 0 else "N/A"
                 c = " ⚡" if m.charging else ""
-                lines.append(f"{m.name}: {p}{c}")
+                lines.append(f"{self._translate_runtime_text(m.name)}: {p}{c}")
 
                 # 仅在已读到有效电量、且未充电时才判断低电量通知。
                 # percentage<0 表示休眠/未就绪，不应触发告警避免误报。
@@ -244,16 +270,60 @@ class TrayApp:
                     if self.config_manager.should_notify(m.name, m.percentage):
                         try:
                             self._tray.notify(
-                                f"{m.name} 当前电量只有 {m.percentage}%，请及时充电！",
-                                title="鼠标电量告警"
+                                self._t('tray.notification.low_battery_message', name=self._translate_runtime_text(m.name), percent=m.percentage),
+                                title=self._t('tray.notification.low_battery_title')
                             )
                             logger.info(f"触发低电量弹窗: {m.name} {m.percentage}%")
                         except Exception as e:
                             logger.error(f"弹窗通知失败: {e}")
 
+            if keyboard:
+                p = f"{keyboard.percentage}%" if keyboard.percentage >= 0 else "N/A"
+                c = " ⚡" if keyboard.charging else ""
+                lines.append(f"{self._translate_runtime_text(keyboard.name)}: {p}{c}")
+
             # Windows tooltip 上限约 128 字符，做安全截断避免乱码
             self._tray.title = "\n".join(lines)[:120]
         self._tray.menu = self._build_menu()
+
+    def _select_icon_target(self, valid_mice: list[MouseInfo], valid_keyboard) -> Optional[dict]:
+        """根据配置选择当前托盘图标要显示哪一台设备的电量。
+
+        三种策略分别对应用户在设置面板中的选择：
+        - 优先鼠标：有有效鼠标时优先显示鼠标，否则退回键盘
+        - 优先键盘：有有效键盘时优先显示键盘，否则退回鼠标
+        - 低电量优先：在所有有效设备中选电量最低者
+        """
+        priority = self.config_manager.tray_icon_priority
+        mouse_low = min(valid_mice, key=lambda item: item.percentage) if valid_mice else None
+        keyboard_target = None
+        if valid_keyboard:
+            keyboard_target = {
+                'percentage': valid_keyboard.percentage,
+                'charging': valid_keyboard.charging,
+            }
+
+        if priority == TRAY_ICON_PRIORITY_KEYBOARD_FIRST:
+            if keyboard_target:
+                return keyboard_target
+            if mouse_low:
+                return {'percentage': mouse_low.percentage, 'charging': mouse_low.charging}
+            return None
+
+        if priority == TRAY_ICON_PRIORITY_LOWEST_BATTERY:
+            samples = []
+            if mouse_low:
+                samples.append({'percentage': mouse_low.percentage, 'charging': mouse_low.charging})
+            if keyboard_target:
+                samples.append(keyboard_target)
+            if not samples:
+                return None
+            return min(samples, key=lambda item: item['percentage'])
+
+        # 默认策略：优先鼠标，再退回键盘。
+        if mouse_low:
+            return {'percentage': mouse_low.percentage, 'charging': mouse_low.charging}
+        return keyboard_target
 
     def _build_menu(self) -> Menu:
         items = []
@@ -261,20 +331,20 @@ class TrayApp:
         if mice:
             for m in mice:
                 p = f"{m.percentage}%" if m.percentage >= 0 else "N/A"
-                c = " ⚡充电中" if m.charging else ""
+                c = self._t('tray.menu.charging_suffix') if m.charging else ""
                 items.append(MenuItem(
-                    f"[{m.brand.value}] {m.name}: {p}{c}", None, enabled=False
+                    f"[{self._translate_brand_name(m.brand.value)}] {self._translate_runtime_text(m.name)}: {p}{c}", None, enabled=False
                 ))
             items.append(Menu.SEPARATOR)
         else:
-            items.append(MenuItem("未发现设备", None, enabled=False))
+            items.append(MenuItem(self._t('tray.menu.no_device'), None, enabled=False))
             items.append(Menu.SEPARATOR)
 
-        items.append(MenuItem("🔄 立即刷新", self._on_refresh))
+        items.append(MenuItem(self._t('tray.menu.refresh_now'), self._on_refresh))
         if self.on_open_settings:
-            items.append(MenuItem("⚙️ 打开设置", self._on_open_settings_click))
+            items.append(MenuItem(self._t('tray.menu.open_settings'), self._on_open_settings_click))
         items.append(Menu.SEPARATOR)
-        items.append(MenuItem("❌ 退出", self._on_quit))
+        items.append(MenuItem(self._t('tray.menu.quit'), self._on_quit))
         return Menu(*items)
 
     # ---- 菜单回调 ----

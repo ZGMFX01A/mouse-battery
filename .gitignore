@@ -24,6 +24,13 @@ Thumbs.db
 
 # 其他环境相关
 .env
+.private-requirements.txt
+.private-requirements.example.txt
+.private-core-src/
+mouse-battery-core/
+keyboard/测试记录.md
 *.log
 .ace-tool/
 .codestable/
+docs/dev/private-core-build.md
+docs/local/README.local.md

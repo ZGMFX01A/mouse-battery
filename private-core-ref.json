@@ -1,0 +1,7 @@
+{
+  "distribution_name": "mouse-battery-core",
+  "import_name": "mouse_battery_core",
+  "ref": "main",
+  "ci_checkout_path": "mouse-battery-core",
+  "local_editable_path": "../mouse-battery-core"
+}
