@@ -138,11 +138,11 @@ jobs:
           }
 
           $fallbackPath = "release-body-fallback.md"
-          @"
-# $version
-
-- 本次发布未提供单独的版本说明文件，请回看对应提交记录与仓库文档。
-"@ | Out-File -FilePath $fallbackPath -Encoding utf8
+          @(
+            "# $version"
+            ""
+            "- 本次发布未提供单独的版本说明文件，请回看对应提交记录与仓库文档。"
+          ) | Out-File -FilePath $fallbackPath -Encoding utf8
           echo "BODY_PATH=$fallbackPath" >> $env:GITHUB_OUTPUT
 
       - name: Release to GitHub
