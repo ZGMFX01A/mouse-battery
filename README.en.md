@@ -117,11 +117,6 @@ To enable battery display for a Weikav dual-8K mechanical keyboard:
 
 - Yes. Minor differences can happen because of refresh timing or percentage conversion.
 
-## 👤 Author
-
-- **GitHub**: [ZGMFX01A](https://github.com/ZGMFX01A)
-- **Email**: 839140758@qq.com
-
 ## © Copyright
 
 All rights reserved. **Commercial use is prohibited.** This project is for personal learning and non-commercial use only.
