@@ -100,12 +100,15 @@ jobs:
       - name: Inject version from tag
         run: |
           if ("${{ github.ref_type }}" -eq "tag") {
-            "${{ github.ref_name }}" | Out-File -FilePath VERSION -Encoding utf8 -NoNewline
+            # Windows PowerShell 的 -Encoding utf8 会写 BOM，改用 ascii（tag 只含 ASCII）
+            "${{ github.ref_name }}" | Out-File -FilePath VERSION -Encoding ascii -NoNewline
           }
           Write-Host "VERSION content: $(Get-Content VERSION)"
 
       - name: Build with PyInstaller
         run: python build.py
+        env:
+          PYTHONUTF8: "1"
 
       - name: Smoke test frozen executable
         run: |

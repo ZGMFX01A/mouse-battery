@@ -117,7 +117,9 @@ def _parse_version(version_str: str) -> tuple[int, int, int]:
 
 def _read_local_version(version_file: str) -> str:
     try:
-        with open(version_file, 'r', encoding='utf-8') as f:
+        # utf-8-sig：CI 里 PowerShell Out-File 写入的 VERSION 带 BOM，
+        # 必须吞掉，否则 ﻿ 混进版本号导致解析和 cp1252 打印双双出错。
+        with open(version_file, 'r', encoding='utf-8-sig') as f:
             return f.read().strip()
     except Exception:
         return "v0.0.0"
