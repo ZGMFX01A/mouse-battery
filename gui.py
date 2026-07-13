@@ -1182,14 +1182,29 @@ class MouseBatteryApp:
             dialog.actions[1].disabled = True
             self._safe_update()
 
-            last_pct = [-1]
+            # 按时间节流 UI 刷新（而非按百分比）：慢链路上 1% 可能要几十秒，
+            # 期间界面毫无变化会被误认为卡死；这里固定 200ms 刷一次，
+            # 并显示已下载字节与实时速度，保证始终"有反应"。
+            start_ts = time.monotonic()
+            last_ui = [0.0]
 
             def progress(pct, dl, total):
-                if pct != last_pct[0]:
-                    last_pct[0] = pct
+                now = time.monotonic()
+                finished = total > 0 and dl >= total
+                if not finished and now - last_ui[0] < 0.2:
+                    return
+                last_ui[0] = now
+                speed_mb = dl / max(now - start_ts, 0.001) / (1024 * 1024)
+                dl_mb = dl / (1024 * 1024)
+                if pct >= 0:
                     pb.value = pct / 100.0
-                    status_txt.value = self._t('update.downloading', percent=pct)
-                    self._safe_update()
+                    detail = f"{dl_mb:.1f}/{total / (1024 * 1024):.1f} MB · {speed_mb:.2f} MB/s"
+                    status_txt.value = f"{self._t('update.downloading', percent=pct)}  {detail}"
+                else:
+                    # 服务端未返回 Content-Length，进度条转为不确定模式
+                    pb.value = None
+                    status_txt.value = f"{self._t('update.downloading', percent=0)}  {dl_mb:.1f} MB · {speed_mb:.2f} MB/s"
+                self._safe_update()
 
             def worker():
                 host_pid = None

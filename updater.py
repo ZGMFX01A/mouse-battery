@@ -4,11 +4,14 @@ Github Release 自动更新模块
 通过拉取最新 Release，检查标签版本并提供下载热替换的方法。
 """
 import os
+import re
 import sys
 import json
 import logging
+import socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -22,13 +25,50 @@ REPO_NAME = "mouse-battery"
 API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
 SHUTDOWN_REQUEST_PREFIX = "mouse_battery_shutdown"
 
+# --- IPv4 优先解析 ---------------------------------------------------------
+# Windows 上 urllib 没有浏览器的 Happy Eyeballs：若系统拿到 IPv6 地址但路由
+# 不通，socket 会先在 IPv6 上耗尽整个连接超时才回退 IPv4，表现为"浏览器
+# 下载几秒、程序里几分钟没反应"。这里把 getaddrinfo 结果按 IPv4 优先排序，
+# 只在本模块的网络调用期间生效（加锁串行，避免污染其他线程的并发解析）。
+_ipv4_lock = threading.Lock()
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_first_getaddrinfo(*args, **kwargs):
+    results = _orig_getaddrinfo(*args, **kwargs)
+    return sorted(results, key=lambda ai: 0 if ai[0] == socket.AF_INET else 1)
+
+
+def _urlopen(url: str, timeout: float, retries: int = 1):
+    """带 IPv4 优先与一次重试的 urlopen。"""
+    req = urllib.request.Request(url, headers={'User-Agent': 'MouseBattery-Updater'})
+    last_err: Exception = RuntimeError("unreachable")
+    for attempt in range(retries + 1):
+        try:
+            with _ipv4_lock:
+                socket.getaddrinfo = _ipv4_first_getaddrinfo
+                try:
+                    return urllib.request.urlopen(req, timeout=timeout)
+                finally:
+                    socket.getaddrinfo = _orig_getaddrinfo
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                logger.warning(f"请求失败将重试({attempt + 1}/{retries}): {url}, err={e}")
+                time.sleep(1)
+    raise last_err
+
+
 def parse_version(version_str: str) -> tuple:
-    """提取版本号数字 (v1.3.0 -> (1, 3, 0))"""
-    v = version_str.lower().strip().lstrip('v')
-    try:
-        return tuple(map(int, v.split('.')))
-    except ValueError:
+    """提取版本号数字。
+
+    用正则截取开头的 X.Y.Z，兼容 v1.3.0 / 1.3.0 以及带后缀描述的
+    tag（如 "v2.0.1-修复xxx"），解析失败返回 (0, 0, 0)。
+    """
+    m = re.match(r'v?(\d+)\.(\d+)\.(\d+)', (version_str or "").strip().lower())
+    if not m:
         return (0, 0, 0)
+    return tuple(int(p) for p in m.groups())
 
 
 def _normalize_version_text(version_str: str) -> str:
@@ -63,8 +103,7 @@ def check_for_update(current_version: str) -> tuple[bool, str, str, str]:
     返回 (是否有更新, 最新版号, 下载链接, 更新日志)
     """
     try:
-        req = urllib.request.Request(API_URL, headers={'User-Agent': 'MouseBattery-Updater'})
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with _urlopen(API_URL, timeout=8, retries=1) as response:
             data = json.loads(response.read().decode('utf-8'))
 
             latest_version = data.get('tag_name', '')
@@ -276,12 +315,13 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
 
     try:
         # 1. 下载新文件到 .new（避免边运行边改名当前 exe 导致卡死）
-        req = urllib.request.Request(download_url, headers={'User-Agent': 'MouseBattery-Updater'})
-        with urllib.request.urlopen(req, timeout=30) as response:
+        # timeout=20 是 socket 级空闲超时：连接或任一次 read 超过 20s 无数据
+        # 就抛异常，而不是无限期挂住让用户等几分钟没反应。
+        with _urlopen(download_url, timeout=20, retries=1) as response:
             content_len = response.info().get('Content-Length', '0').strip()
             total_size = int(content_len) if content_len.isdigit() else 0
             downloaded = 0
-            chunk_size = 1024 * 16  # 16KB 缓冲
+            chunk_size = 1024 * 256  # 256KB 缓冲，小分块在高延迟链路上白白增加循环开销
 
             with open(new_exe_path, 'wb') as f:
                 while True:
@@ -290,8 +330,8 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
                         break
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if on_progress and total_size > 0:
-                        pct = int(downloaded / total_size * 100)
+                    if on_progress:
+                        pct = int(downloaded / total_size * 100) if total_size > 0 else -1
                         on_progress(pct, downloaded, total_size)
 
         if downloaded <= 0:

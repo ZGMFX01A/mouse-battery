@@ -6,6 +6,7 @@ PyInstaller 打包脚本
 """
 
 import subprocess
+import re
 import sys
 import os
 import urllib.request
@@ -104,15 +105,12 @@ def discover_private_core_source_roots(private_core_module, reference: dict) -> 
 
 
 def _parse_version(version_str: str) -> tuple[int, int, int]:
-    """将版本字符串转为可比较元组。支持 v1.5.3 / 1.5.3。"""
-    v = (version_str or "").strip().lower().lstrip('v')
-    try:
-        parts = v.split('.')
-        if len(parts) != 3:
-            return (0, 0, 0)
-        return tuple(int(p) for p in parts)
-    except Exception:
+    """将版本字符串转为可比较元组。用正则提取开头的 X.Y.Z，
+    兼容 v1.5.3 / 1.5.3 及带后缀描述的 tag，失败返回 (0, 0, 0)。"""
+    m = re.match(r'v?(\d+)\.(\d+)\.(\d+)', (version_str or "").strip().lower())
+    if not m:
         return (0, 0, 0)
+    return tuple(int(p) for p in m.groups())
 
 
 def _read_local_version(version_file: str) -> str:
