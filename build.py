@@ -270,6 +270,12 @@ def build():
 
     # 隐式导入和其他启动文件
     cmd.extend([
+        # asyncio 在 Windows 上的 IOCP 事件循环依赖 _overlapped C 扩展，
+        # flet 导入 asyncio.windows_events 时需要；PyInstaller 静态分析
+        # 偶尔漏收，onefile 运行时会报 "No module named '_overlapped'"。
+        '--hidden-import', '_overlapped',
+        '--hidden-import', 'asyncio.windows_events',
+        '--hidden-import', 'asyncio.windows_utils',
         '--hidden-import', 'pystray._win32',
         '--hidden-import', 'PIL',
         '--hidden-import', 'hid',
