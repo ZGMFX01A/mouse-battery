@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import json
+import hashlib
 import logging
 import socket
 import subprocess
@@ -24,6 +25,8 @@ REPO_OWNER = "ZGMFX01A"
 REPO_NAME = "mouse-battery"
 API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
 SHUTDOWN_REQUEST_PREFIX = "mouse_battery_shutdown"
+DOWNLOAD_MIRROR_PREFIX = "https://ghfast.top/"
+MIN_VALID_EXE_BYTES = 1024 * 1024
 
 # --- IPv4 优先解析 ---------------------------------------------------------
 # Windows 上 urllib 没有浏览器的 Happy Eyeballs：若系统拿到 IPv6 地址但路由
@@ -39,7 +42,7 @@ def _ipv4_first_getaddrinfo(*args, **kwargs):
     return sorted(results, key=lambda ai: 0 if ai[0] == socket.AF_INET else 1)
 
 
-def _urlopen(url: str, timeout: float, retries: int = 1):
+def _urlopen(url: str, timeout: float, retries: int = 1, on_retry=None):
     """带 IPv4 优先与一次重试的 urlopen。"""
     req = urllib.request.Request(url, headers={'User-Agent': 'MouseBattery-Updater'})
     last_err: Exception = RuntimeError("unreachable")
@@ -55,6 +58,8 @@ def _urlopen(url: str, timeout: float, retries: int = 1):
             last_err = e
             if attempt < retries:
                 logger.warning(f"请求失败将重试({attempt + 1}/{retries}): {url}, err={e}")
+                if on_retry:
+                    on_retry(attempt + 1, retries, e)
                 time.sleep(1)
     raise last_err
 
@@ -97,10 +102,10 @@ def _pick_release_asset(assets: list, latest_version: str) -> dict:
     return candidates[0] if candidates else {}
 
 
-def check_for_update(current_version: str) -> tuple[bool, str, str, str]:
+def check_for_update(current_version: str) -> tuple[bool, str, str, str, int, str]:
     """
     检查更新
-    返回 (是否有更新, 最新版号, 下载链接, 更新日志)
+    返回 (是否有更新, 最新版号, 下载链接, 更新日志, 文件大小, SHA-256)
     """
     try:
         with _urlopen(API_URL, timeout=8, retries=1) as response:
@@ -116,10 +121,12 @@ def check_for_update(current_version: str) -> tuple[bool, str, str, str]:
             selected = _pick_release_asset(assets, latest_version)
             download_url = selected.get('browser_download_url', '')
             selected_name = selected.get('name', '')
+            asset_size = int(selected.get('size', 0) or 0)
+            asset_digest = str(selected.get('digest', '') or '')
 
             if not download_url:
                 logger.error("Release 中未发现 .exe 产物")
-                return False, current_version, "", ""
+                return False, current_version, "", "", 0, ""
 
             logger.info(
                 f"更新检查命中资源: tag={latest_version}, asset={selected_name or '<unknown>'}"
@@ -129,13 +136,89 @@ def check_for_update(current_version: str) -> tuple[bool, str, str, str]:
             latest_tup = parse_version(latest_version)
 
             if latest_tup > current_tup:
-                return True, latest_version, download_url, body
+                return True, latest_version, download_url, body, asset_size, asset_digest
 
-            return False, latest_version, "", ""
+            return False, latest_version, "", "", 0, ""
 
     except Exception as e:
         logger.error(f"检查更新失败: {e}")
-        return False, "", "", str(e)
+        return False, "", "", str(e), 0, ""
+
+
+def _normalize_sha256(digest: str) -> str:
+    """从 GitHub asset digest 中提取可用于强校验的 SHA-256。"""
+    match = re.fullmatch(r'sha256:([0-9a-fA-F]{64})', (digest or '').strip())
+    return match.group(1).lower() if match else ''
+
+
+def _notify_status(on_status, stage: str, detail: str = '') -> None:
+    if not on_status:
+        return
+    try:
+        on_status(stage, detail)
+    except Exception as e:
+        logger.warning(f"更新状态回调失败: stage={stage}, err={e}")
+
+
+def _download_to_path(url: str, target_path: str, on_progress=None,
+                      expected_size: int = 0, retries: int = 0,
+                      on_retry=None) -> tuple[int, str]:
+    """下载单个来源并返回实际字节数与 SHA-256。"""
+    for attempt in range(retries + 1):
+        try:
+            with _urlopen(url, timeout=20, retries=0) as response:
+                content_len = response.info().get('Content-Length', '0').strip()
+                response_size = int(content_len) if content_len.isdigit() else 0
+                total_size = expected_size if expected_size > 0 else response_size
+                downloaded = 0
+                hasher = hashlib.sha256()
+                read_chunk = getattr(response, 'read1', response.read)
+
+                with open(target_path, 'wb') as f:
+                    while True:
+                        chunk = read_chunk(1024 * 256)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        hasher.update(chunk)
+                        downloaded += len(chunk)
+                        if on_progress:
+                            pct = int(downloaded / total_size * 100) if total_size > 0 else -1
+                            on_progress(min(pct, 100), downloaded, total_size)
+
+            return downloaded, hasher.hexdigest()
+        except Exception as e:
+            if attempt >= retries:
+                raise
+            if on_retry:
+                on_retry(attempt + 1, retries, e)
+            time.sleep(1)
+
+    raise RuntimeError("更新下载重试耗尽")
+
+
+def _validate_download(target_path: str, downloaded: int, actual_sha256: str,
+                       expected_size: int, expected_sha256: str) -> int:
+    """校验单个下载来源；只有通过校验才算该来源成功。"""
+    if downloaded <= 0:
+        raise RuntimeError("下载到的更新文件为空")
+    if downloaded < MIN_VALID_EXE_BYTES:
+        raise RuntimeError(f"下载到的更新文件过小 ({downloaded} 字节)，疑似截断下载")
+
+    actual_size = os.path.getsize(target_path)
+    if actual_size != downloaded:
+        raise RuntimeError(
+            f"已下载文件大小不一致: expected={downloaded}, actual={actual_size}"
+        )
+    if expected_size > 0 and actual_size != expected_size:
+        raise RuntimeError(
+            f"更新文件大小校验失败: expected={expected_size}, actual={actual_size}"
+        )
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            f"更新文件 SHA-256 校验失败: expected={expected_sha256}, actual={actual_sha256}"
+        )
+    return actual_size
 
 
 def _safe_remove(path: str) -> None:
@@ -264,7 +347,7 @@ def _build_swap_script_lines(exe_path: str, old_exe_path: str,
         # 刚刚被 set，用 %NEW_SIZE% 普通展开会拿到旧值导致校验失效。
         f'for %%I in ("{new_exe_path}") do set NEW_SIZE=%%~zI',
         f'if not defined NEW_SIZE goto verify_fail',
-        f'if !NEW_SIZE! LSS {expected_size} goto verify_fail',
+        f'if !NEW_SIZE! NEQ {expected_size} goto verify_fail',
         "set SWAP_RETRY=0",
         ":swap_retry",
         "if %SWAP_RETRY% GEQ 20 goto fail",
@@ -291,7 +374,8 @@ def _build_swap_script_lines(exe_path: str, old_exe_path: str,
     ]
 
 
-def download_and_install(download_url: str, on_progress=None, host_pid: Optional[int] = None):
+def download_and_install(download_url: str, on_progress=None, host_pid: Optional[int] = None,
+                         expected_size: int = 0, expected_digest: str = '', on_status=None):
     """
     下载并准备替换当前文件。然后自动重启应用程序。
     如果当前是脚本运行，则直接中断（不覆盖脚本本身）。
@@ -299,6 +383,7 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
     # 如果没被 PyInstaller 打包过，则不执行覆盖重启操作
     if not getattr(sys, 'frozen', False):
         logger.info("当前处于代码调试模式，跳过覆盖更新。如果打包，会自动替换文件。")
+        _notify_status(on_status, 'error', 'debug_mode')
         return False
 
     current_pid = os.getpid()
@@ -314,50 +399,57 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
     skip_gui_pid = current_pid if target_pid != current_pid else None
 
     try:
-        # 1. 下载新文件到 .new（避免边运行边改名当前 exe 导致卡死）
-        # timeout=20 是 socket 级空闲超时：连接或任一次 read 超过 20s 无数据
-        # 就抛异常，而不是无限期挂住让用户等几分钟没反应。
-        with _urlopen(download_url, timeout=20, retries=1) as response:
-            content_len = response.info().get('Content-Length', '0').strip()
-            total_size = int(content_len) if content_len.isdigit() else 0
-            downloaded = 0
-            chunk_size = 1024 * 256  # 256KB 缓冲，小分块在高延迟链路上白白增加循环开销
+        # 1. 官方直链优先；只有 GitHub 提供了 SHA-256 时才允许经第三方镜像下载。
+        expected_sha256 = _normalize_sha256(expected_digest)
+        if not expected_sha256:
+            raise RuntimeError("Release 未提供有效的 SHA-256，已拒绝自动更新")
+        sources = [('official', download_url)]
+        if download_url.startswith('https://github.com/'):
+            sources.append(('mirror', DOWNLOAD_MIRROR_PREFIX + download_url))
 
-            with open(new_exe_path, 'wb') as f:
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if on_progress:
-                        pct = int(downloaded / total_size * 100) if total_size > 0 else -1
-                        on_progress(pct, downloaded, total_size)
+        downloaded = 0
+        actual_size = 0
+        actual_sha256 = ''
+        last_download_error: Optional[Exception] = None
+        for index, (source_name, source_url) in enumerate(sources):
+            _safe_remove(new_exe_path)
+            _notify_status(on_status, 'connecting', source_name)
 
-        if downloaded <= 0:
-            raise RuntimeError("下载到的更新文件为空")
+            def on_retry(attempt, retries, error):
+                _notify_status(on_status, 'retrying', f'{source_name}:{attempt}/{retries}:{error}')
 
-        # 最小体积门槛：PyInstaller onefile 打包的 MouseBattery.exe 即使最小化
-        # 也会远超此值。低于此值必然是截断下载，直接拒绝替换，避免启动后
-        # bootloader 解压找不到 python312.dll（《MEIxxxxx\python312.dll 找不到》报错）。
-        MIN_VALID_EXE_BYTES = 1 * 1024 * 1024  # 1 MB
-        if downloaded < MIN_VALID_EXE_BYTES:
-            raise RuntimeError(
-                f"下载到的更新文件过小 ({downloaded} 字节)，疑似截断下载，已拒绝替换"
-            )
+            try:
+                downloaded, actual_sha256 = _download_to_path(
+                    source_url,
+                    new_exe_path,
+                    on_progress=on_progress,
+                    expected_size=expected_size,
+                    retries=1 if source_name == 'mirror' else 0,
+                    on_retry=on_retry,
+                )
+                _notify_status(on_status, 'verifying')
+                actual_size = _validate_download(
+                    new_exe_path,
+                    downloaded,
+                    actual_sha256,
+                    expected_size,
+                    expected_sha256,
+                )
+                last_download_error = None
+                break
+            except Exception as e:
+                last_download_error = e
+                logger.warning(f"更新下载来源失败: source={source_name}, err={type(e).__name__}: {e}")
+                if index + 1 < len(sources):
+                    _notify_status(on_status, 'fallback', str(e))
 
-        # 校验落盘后的实际字节数与下载计数一致；磁盘满/异常会导致写入不完整，
-        # 这时即便内核量达标也直接拒绝，避免坏文件替换掉可正常运行的旧 exe。
-        try:
-            actual_size = os.path.getsize(new_exe_path)
-        except OSError as size_err:
-            raise RuntimeError(f"读取已下载文件大小失败: {size_err}")
-        if actual_size != downloaded:
-            raise RuntimeError(
-                f"已下载文件大小不一致: expected={downloaded}, actual={actual_size}"
-            )
+        if last_download_error is not None:
+            raise last_download_error
 
-        logger.info(f"新版本下载完成: {new_exe_path}, size={actual_size} bytes")
+        logger.info(
+            f"新版本下载并校验完成: {new_exe_path}, size={actual_size} bytes, "
+            f"sha256={actual_sha256}"
+        )
 
         # 2. 通过外部脚本完成替换与拉起，避免当前进程内自改名引发冻结
         #    路径全部加引号，避免含空格/中文路径出错；编码使用本地 OEM 兼容
@@ -402,17 +494,20 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
 
     except Exception as e:
         logger.error(f"应用更新失败: {type(e).__name__}: {e}")
+        _notify_status(on_status, 'error', str(e))
         _safe_remove(new_exe_path)
         _safe_remove(swap_script_path)
         return False
 
 def clean_old_version():
-    """程序启动时调用，专门用于抹除上次更新留下的 .old 僵尸外壳"""
+    """程序启动时清理上次更新留下的旧版本或未完成下载。"""
     if getattr(sys, 'frozen', False):
-        old_exe_path = sys.executable + ".old"
-        if os.path.exists(old_exe_path):
+        for suffix in ('.old', '.new'):
+            stale_path = sys.executable + suffix
+            if not os.path.exists(stale_path):
+                continue
             try:
-                os.remove(old_exe_path)
-                logger.info(f"发现并清理旧版本执行文件: {old_exe_path}")
+                os.remove(stale_path)
+                logger.info(f"发现并清理更新遗留文件: {stale_path}")
             except Exception as e:
-                logger.error(f"清理遗留文件遇到错误: {e}")
+                logger.error(f"清理更新遗留文件失败: path={stale_path}, err={e}")

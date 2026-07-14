@@ -438,13 +438,37 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '准备升级到 {version}...',
         LANGUAGE_EN_US: 'Preparing to upgrade to {version}...',
     },
+    'update.connecting.official': {
+        LANGUAGE_ZH_CN: '正在连接 GitHub 下载源...',
+        LANGUAGE_EN_US: 'Connecting to the GitHub download source...',
+    },
+    'update.connecting.mirror': {
+        LANGUAGE_ZH_CN: '正在连接加速下载源...',
+        LANGUAGE_EN_US: 'Connecting to the accelerated download source...',
+    },
+    'update.retrying': {
+        LANGUAGE_ZH_CN: '连接失败，正在重试...',
+        LANGUAGE_EN_US: 'Connection failed. Retrying...',
+    },
+    'update.fallback': {
+        LANGUAGE_ZH_CN: 'GitHub 下载不可用，正在切换加速源...',
+        LANGUAGE_EN_US: 'GitHub download is unavailable. Switching to the accelerated source...',
+    },
     'update.downloading': {
         LANGUAGE_ZH_CN: '正在下载... {percent}%',
         LANGUAGE_EN_US: 'Downloading... {percent}%',
     },
-    'update.failed_or_debug': {
-        LANGUAGE_ZH_CN: '更新失败或仍在调试环境中，请直接去 GitHub 下载',
-        LANGUAGE_EN_US: 'Update failed or the app is still running in a debug environment. Please download it directly from GitHub.',
+    'update.downloading_unknown': {
+        LANGUAGE_ZH_CN: '正在下载...',
+        LANGUAGE_EN_US: 'Downloading...',
+    },
+    'update.verifying': {
+        LANGUAGE_ZH_CN: '下载完成，正在校验更新文件...',
+        LANGUAGE_EN_US: 'Download complete. Verifying the update file...',
+    },
+    'update.failed': {
+        LANGUAGE_ZH_CN: '更新失败：{error}',
+        LANGUAGE_EN_US: 'Update failed: {error}',
     },
     'update.new_version.title': {
         LANGUAGE_ZH_CN: '发现新版本 {version}',

@@ -7,6 +7,7 @@
 - 电量展示改为大数字 + 横向进度条，减少圆环仪表盘带来的视觉噪音
 """
 
+import asyncio
 import os
 import time
 import threading
@@ -1106,7 +1107,7 @@ class MouseBatteryApp:
         self._safe_update()
 
         done_event = threading.Event()
-        result_holder = [None]  # (has_update, latest, url, body)
+        result_holder = [None]  # (has_update, latest, url, body, asset_size, asset_digest)
 
         def check():
             try:
@@ -1114,7 +1115,7 @@ class MouseBatteryApp:
             except Exception as ex:
                 # 兜底：网络异常由 check_for_update 内部捕获，这里防御未预期异常
                 logger.error(f'check_for_update 抛出异常: {ex}')
-                result_holder[0] = (False, '', '', str(ex))
+                result_holder[0] = (False, '', '', str(ex), 0, '')
             finally:
                 done_event.set()
 
@@ -1139,9 +1140,13 @@ class MouseBatteryApp:
                     ))
                     return
 
-                has_update, latest, url, body = result_holder[0]
+                has_update, latest, url, body, asset_size, asset_digest = result_holder[0]
                 if has_update:
-                    self._safe_show_helper(lambda: self._show_update_dialog(latest, url, body))
+                    self._safe_show_helper(
+                        lambda: self._show_update_dialog(
+                            latest, url, body, asset_size, asset_digest
+                        )
+                    )
                 else:
                     if latest:
                         msg = self._t('update.latest.message', version=APP_VERSION)
@@ -1167,58 +1172,133 @@ class MouseBatteryApp:
         """跨线程安全地执行 UI 构建并刷新页面。"""
         if not self.page:
             return
-        try:
-            builder()
-            self.page.update()
-        except Exception as e:
-            logger.error(f'UI 弹窗失败: {e}')
 
-    def _show_update_dialog(self, version: str, url: str, body: str):
+        async def show():
+            try:
+                builder()
+                self.page.update()
+            except Exception as e:
+                logger.error(f'UI 弹窗失败: {e}')
+
+        self.page.run_task(show)
+
+    def _show_update_dialog(self, version: str, url: str, body: str,
+                            asset_size: int, asset_digest: str):
         pb = ft.ProgressBar(width=400, color=COLORS['accent_green'], bgcolor=COLORS['bg_line'], value=0)
         status_txt = ft.Text(self._t('update.prepare', version=version), color=COLORS['text_secondary'], size=12)
 
         def do_update(e):
             dialog.actions[0].disabled = True
             dialog.actions[1].disabled = True
+            pb.value = None
+            status_txt.value = self._t('update.connecting.official')
             self._safe_update()
 
-            # 按时间节流 UI 刷新（而非按百分比）：慢链路上 1% 可能要几十秒，
-            # 期间界面毫无变化会被误认为卡死；这里固定 200ms 刷一次，
-            # 并显示已下载字节与实时速度，保证始终"有反应"。
-            start_ts = time.monotonic()
-            last_ui = [0.0]
+            state_lock = threading.Lock()
+            state = {'revision': 0, 'stage': 'connecting', 'detail': 'official', 'progress': None}
+            source_started = [time.monotonic()]
 
             def progress(pct, dl, total):
-                now = time.monotonic()
-                finished = total > 0 and dl >= total
-                if not finished and now - last_ui[0] < 0.2:
-                    return
-                last_ui[0] = now
-                speed_mb = dl / max(now - start_ts, 0.001) / (1024 * 1024)
-                dl_mb = dl / (1024 * 1024)
-                if pct >= 0:
-                    pb.value = pct / 100.0
-                    detail = f"{dl_mb:.1f}/{total / (1024 * 1024):.1f} MB · {speed_mb:.2f} MB/s"
-                    status_txt.value = f"{self._t('update.downloading', percent=pct)}  {detail}"
-                else:
-                    # 服务端未返回 Content-Length，进度条转为不确定模式
-                    pb.value = None
-                    status_txt.value = f"{self._t('update.downloading', percent=0)}  {dl_mb:.1f} MB · {speed_mb:.2f} MB/s"
-                self._safe_update()
+                elapsed = max(time.monotonic() - source_started[0], 0.001)
+                with state_lock:
+                    state.update(
+                        revision=state['revision'] + 1,
+                        stage='downloading',
+                        progress=(pct, dl, total, dl / elapsed),
+                    )
 
-            def worker():
+            def update_status(stage, detail=''):
+                if stage in ('connecting', 'retrying'):
+                    source_started[0] = time.monotonic()
+                with state_lock:
+                    state.update(
+                        revision=state['revision'] + 1,
+                        stage=stage,
+                        detail=detail,
+                        progress=None,
+                    )
+
+            last_rendered = [-1]
+
+            def render_state():
+                with state_lock:
+                    snapshot = dict(state)
+                if snapshot['revision'] == last_rendered[0]:
+                    return
+                stage = snapshot['stage']
+                detail = snapshot['detail']
+
+                if stage == 'downloading' and snapshot['progress']:
+                    pct, dl, total, speed = snapshot['progress']
+                    dl_mb = dl / (1024 * 1024)
+                    speed_mb = speed / (1024 * 1024)
+                    if total > 0 and pct >= 0:
+                        pb.value = min(pct / 100.0, 1.0)
+                        size_text = f"{dl_mb:.1f}/{total / (1024 * 1024):.1f} MB"
+                        status_txt.value = f"{self._t('update.downloading', percent=pct)}  {size_text} · {speed_mb:.2f} MB/s"
+                    else:
+                        pb.value = None
+                        status_txt.value = f"{self._t('update.downloading_unknown')}  {dl_mb:.1f} MB · {speed_mb:.2f} MB/s"
+                elif stage == 'connecting':
+                    pb.value = None
+                    key = 'update.connecting.mirror' if detail == 'mirror' else 'update.connecting.official'
+                    status_txt.value = self._t(key)
+                elif stage == 'retrying':
+                    pb.value = None
+                    status_txt.value = self._t('update.retrying')
+                elif stage == 'fallback':
+                    pb.value = None
+                    status_txt.value = self._t('update.fallback')
+                elif stage == 'verifying':
+                    pb.value = None
+                    status_txt.value = self._t('update.verifying')
+                elif stage == 'error':
+                    pb.value = 0
+                    status_txt.value = self._t('update.failed', error=detail)
+
+                if not self.page:
+                    return
+                try:
+                    self.page.update(pb, status_txt)
+                    last_rendered[0] = snapshot['revision']
+                except Exception as ex:
+                    logger.warning(f'更新进度界面刷新失败，将继续重试: {ex}')
+
+            async def worker():
                 host_pid = None
                 host_pid_env = os.environ.get('MOUSE_BATTERY_HOST_PID', '').strip()
                 if host_pid_env.isdigit():
                     host_pid = int(host_pid_env)
 
-                success = updater.download_and_install(url, progress, host_pid=host_pid)
-                if not success:
-                    status_txt.value = self._t('update.failed_or_debug')
+                download_task = asyncio.create_task(asyncio.to_thread(
+                    updater.download_and_install,
+                    url,
+                    progress,
+                    host_pid,
+                    asset_size,
+                    asset_digest,
+                    update_status,
+                ))
+                while not download_task.done():
+                    render_state()
+                    await asyncio.sleep(0.2)
+
+                success = False
+                try:
+                    success = await download_task
+                    render_state()
+                except Exception as ex:
+                    logger.error(f'更新下载任务异常: {ex}')
+                    update_status('error', str(ex))
+                    render_state()
+                    success = False
+                finally:
+                    if success:
+                        return
                     dialog.actions[1].disabled = False
                     self._safe_update()
 
-            threading.Thread(target=worker, daemon=True).start()
+            self.page.run_task(worker)
 
         def close_dialog(e):
             dialog.open = False

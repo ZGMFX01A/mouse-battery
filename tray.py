@@ -204,10 +204,14 @@ class TrayApp:
             if self.config_manager.auto_update:
                 def auto_check():
                     time.sleep(10) # 延迟10秒执行，避免抢占启动阶段资源
-                    has_update, _, url, _ = updater.check_for_update(APP_VERSION)
+                    has_update, _, url, _, asset_size, asset_digest = updater.check_for_update(APP_VERSION)
                     if has_update:
                         logger.info("系统后台发现新版本，开始静默下载升级...")
-                        updater.download_and_install(url)
+                        updater.download_and_install(
+                            url,
+                            expected_size=asset_size,
+                            expected_digest=asset_digest,
+                        )
                 threading.Thread(target=auto_check, daemon=True).start()
         threading.Thread(target=boot, daemon=True).start()
 
