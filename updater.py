@@ -500,12 +500,10 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
         return False
 
 def clean_old_version():
-    """程序启动时清理上次更新留下的旧版本或未完成下载。"""
+    """程序启动时清理上次更新留下的旧版本。"""
     if getattr(sys, 'frozen', False):
-        for suffix in ('.old', '.new'):
-            stale_path = sys.executable + suffix
-            if not os.path.exists(stale_path):
-                continue
+        stale_path = sys.executable + '.old'
+        if os.path.exists(stale_path):
             try:
                 os.remove(stale_path)
                 logger.info(f"发现并清理更新遗留文件: {stale_path}")

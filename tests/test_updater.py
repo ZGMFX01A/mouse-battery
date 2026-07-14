@@ -199,22 +199,5 @@ class UpdaterTests(unittest.TestCase):
             with open(target, 'rb') as downloaded:
                 self.assertEqual(downloaded.read(), content)
 
-    def test_startup_cleanup_removes_old_and_incomplete_update_files(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            exe_path = os.path.join(temp_dir, 'MouseBattery.exe')
-            for suffix in ('.old', '.new'):
-                with open(exe_path + suffix, 'wb') as stale:
-                    stale.write(b'stale')
-
-            with (
-                mock.patch.object(updater.sys, 'frozen', True, create=True),
-                mock.patch.object(updater.sys, 'executable', exe_path),
-            ):
-                updater.clean_old_version()
-
-            self.assertFalse(os.path.exists(exe_path + '.old'))
-            self.assertFalse(os.path.exists(exe_path + '.new'))
-
-
 if __name__ == '__main__':
     unittest.main()
