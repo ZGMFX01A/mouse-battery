@@ -1737,18 +1737,22 @@ class MouseBatteryApp:
             margin=ft.Margin.only(bottom=10),
         )
 
-        # 操作按钮区：不再做厚重固定底栏，改成轻按钮组。
-        action_row = ft.Row(
+        # 明确拆成两行；Flet 0.85 Windows 客户端会把 Row(wrap=True)
+        # 的换行区域错误渲染成整块灰色占位。
+        action_row = ft.Column(
             controls=[
-                self.scan_btn,
-                self.refresh_btn,
-                self.add_keyboard_btn,
-                self.add_bluetooth_btn,
-                self.check_update_btn,
+                ft.Row(
+                    controls=[self.scan_btn, self.refresh_btn, self.add_keyboard_btn],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    controls=[self.add_bluetooth_btn, self.check_update_btn],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
             ],
-            spacing=12,
-            wrap=True,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=8,
         )
 
         # 底部设备状态条。
