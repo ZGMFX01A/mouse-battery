@@ -17,16 +17,22 @@ from enum import Enum
 from config import ConfigManager
 from core_bridge import (
     BatteryInfo,
+    BluetoothCandidate,
+    BluetoothInfo,
     KeyboardCandidate,
     KeyboardInfo,
     MouseBackendHandle,
     RazerBatteryInfo,
     close_mouse_backend,
+    bluetooth_binding_from_candidate,
+    enumerate_bluetooth_candidates,
     enumerate_keyboard_candidates,
     enumerate_mouse_backends,
     keyboard_binding_from_candidate,
     keyboard_binding_from_info,
     read_keyboard_battery,
+    probe_bluetooth_candidate,
+    read_bluetooth_batteries,
     read_mouse_battery,
 )
 
@@ -39,6 +45,9 @@ DEVICE_COMMAND_SCAN_KEYBOARD_CANDIDATES = 'scan_keyboard_candidates'
 DEVICE_COMMAND_BIND_KEYBOARD = 'bind_keyboard'
 # GUI -> tray 的轻量命令动作：解除当前键盘绑定。
 DEVICE_COMMAND_UNBIND_KEYBOARD = 'unbind_keyboard'
+DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES = 'scan_bluetooth_candidates'
+DEVICE_COMMAND_BIND_BLUETOOTH = 'bind_bluetooth'
+DEVICE_COMMAND_UNBIND_BLUETOOTH = 'unbind_bluetooth'
 # GUI -> tray 的轻量命令动作：立即按最新配置重算托盘图标。
 DEVICE_COMMAND_REFRESH_TRAY_ICON = 'refresh_tray_icon'
 
@@ -117,6 +126,10 @@ class DeviceManager:
         self._keyboard_candidates: list[KeyboardCandidate] = []
         self._keyboard_scan_state = 'idle'
         self._keyboard_scan_message = ''
+        self._bluetooth_devices: list[BluetoothInfo] = []
+        self._bluetooth_candidates: list[BluetoothCandidate] = []
+        self._bluetooth_scan_state = 'idle'
+        self._bluetooth_scan_message = ''
         # _mice[i] 对应的桥接后端句柄：
         # 刷新时通过遍历该映射读电，避免 idx 错位
         self._mouse_to_device: list[tuple[Brand, MouseBackendHandle]] = []
@@ -160,6 +173,26 @@ class DeviceManager:
     def keyboard_scan_message(self) -> str:
         with self._lock:
             return self._keyboard_scan_message
+
+    @property
+    def bluetooth_devices(self) -> list[BluetoothInfo]:
+        with self._lock:
+            return list(self._bluetooth_devices)
+
+    @property
+    def bluetooth_candidates(self) -> list[BluetoothCandidate]:
+        with self._lock:
+            return list(self._bluetooth_candidates)
+
+    @property
+    def bluetooth_scan_state(self) -> str:
+        with self._lock:
+            return self._bluetooth_scan_state
+
+    @property
+    def bluetooth_scan_message(self) -> str:
+        with self._lock:
+            return self._bluetooth_scan_message
 
     def set_on_update(self, callback: Callable):
         """设置数据更新回调（向后兼容，添加到回调列表）"""
@@ -206,6 +239,10 @@ class DeviceManager:
                     'keyboard_candidates': [_serialize_keyboard_candidate(candidate) for candidate in self._keyboard_candidates],
                     'keyboard_scan_state': self._keyboard_scan_state,
                     'keyboard_scan_message': self._keyboard_scan_message,
+                    'bluetooth_devices': [_serialize_bluetooth_state(item) for item in self._bluetooth_devices],
+                    'bluetooth_candidates': [_serialize_bluetooth_candidate(item) for item in self._bluetooth_candidates],
+                    'bluetooth_scan_state': self._bluetooth_scan_state,
+                    'bluetooth_scan_message': self._bluetooth_scan_message,
                 }
 
             # 先写临时文件再替换正式文件，避免 GUI 在读取时遇到半截 JSON。
@@ -229,6 +266,7 @@ class DeviceManager:
             self._scan_devices()
             self._refresh_battery()
             self._refresh_keyboard_locked()
+            self._refresh_bluetooth_locked()
         self._notify_update()
 
     def refresh_only(self):
@@ -236,6 +274,7 @@ class DeviceManager:
         with self._io_lock:
             self._refresh_battery()
             self._refresh_keyboard_locked()
+            self._refresh_bluetooth_locked()
 
             # 唤醒后若连续失败且当前无任何有效电量，则触发一次自动重连/重扫
             if self._should_reconnect_after_refresh():
@@ -251,6 +290,7 @@ class DeviceManager:
             self._scan_devices()
             self._refresh_battery()
             self._refresh_keyboard_locked()
+            self._refresh_bluetooth_locked()
             self._last_reconnect_time = time.time()
             logger.info("自动重连/重扫完成")
         except Exception as e:
@@ -277,6 +317,78 @@ class DeviceManager:
         with self._lock:
             self._keyboard_scan_state = state
             self._keyboard_scan_message = message
+
+    def _refresh_bluetooth_locked(self):
+        bindings = self.config_manager.bluetooth_bindings
+        if not bindings:
+            with self._lock:
+                self._bluetooth_devices = []
+            return
+        try:
+            snapshots = read_bluetooth_batteries(bindings)
+        except Exception as exc:
+            logger.error('刷新蓝牙设备失败: %s: %s', type(exc).__name__, exc)
+            snapshots = [
+                BluetoothInfo(
+                    device_id=item['device_id'],
+                    name=item['name'],
+                    status_text=f'蓝牙刷新失败：{type(exc).__name__}',
+                    last_update=time.time(),
+                )
+                for item in bindings
+            ]
+        with self._lock:
+            self._bluetooth_devices = snapshots
+
+    def _scan_bluetooth_candidates(self):
+        with self._lock:
+            self._bluetooth_scan_state = 'loading'
+            self._bluetooth_scan_message = '正在读取 Windows 已配对蓝牙设备...'
+        self._notify_update()
+        try:
+            with self._io_lock:
+                candidates = enumerate_bluetooth_candidates()
+        except Exception as exc:
+            logger.error('枚举蓝牙设备失败: %s', exc)
+            with self._lock:
+                self._bluetooth_candidates = []
+                self._bluetooth_scan_state = 'error'
+                self._bluetooth_scan_message = f'扫描失败：{type(exc).__name__}: {exc}'
+            self._notify_update()
+            return
+
+        with self._lock:
+            self._bluetooth_candidates = candidates
+            self._bluetooth_scan_state = 'ready'
+            self._bluetooth_scan_message = (
+                f'已发现 {len(candidates)} 个 Windows 已配对蓝牙设备'
+                if candidates else '未发现 Windows 已配对蓝牙设备'
+            )
+        self._notify_update()
+
+    def _bind_bluetooth(self, device_id: str):
+        candidates = self.bluetooth_candidates or enumerate_bluetooth_candidates()
+        target = next((item for item in candidates if item.device_id == device_id), None)
+        if target is None:
+            raise ValueError('未找到对应的 Windows 已配对蓝牙设备。')
+        if any(item['device_id'] == device_id for item in self.config_manager.bluetooth_bindings):
+            raise ValueError('该蓝牙设备已经添加。')
+
+        with self._io_lock:
+            snapshot = probe_bluetooth_candidate(target)
+        self.config_manager.add_bluetooth_binding(bluetooth_binding_from_candidate(target))
+        with self._lock:
+            self._bluetooth_devices.append(snapshot)
+            self._bluetooth_scan_state = 'bound'
+            self._bluetooth_scan_message = f'已添加蓝牙设备：{target.name}'
+        self._notify_update()
+
+    def _unbind_bluetooth(self, device_id: str):
+        self.config_manager.remove_bluetooth_binding(device_id)
+        with self._lock:
+            self._bluetooth_devices = [item for item in self._bluetooth_devices if item.device_id != device_id]
+            self._bluetooth_scan_message = '已移除蓝牙设备'
+        self._notify_update()
 
     def _scan_keyboard_candidates(self):
         """由 tray 进程枚举可绑定的键盘候选接口。"""
@@ -370,6 +482,26 @@ class DeviceManager:
             return
         if action == DEVICE_COMMAND_UNBIND_KEYBOARD:
             self._unbind_keyboard()
+            return
+        if action == DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES:
+            self._scan_bluetooth_candidates()
+            return
+        if action == DEVICE_COMMAND_BIND_BLUETOOTH:
+            device_id = str(payload.get('device_id', '') or '').strip()
+            if device_id:
+                try:
+                    self._bind_bluetooth(device_id)
+                except Exception as exc:
+                    logger.error('绑定蓝牙设备失败: %s', exc)
+                    with self._lock:
+                        self._bluetooth_scan_state = 'error'
+                        self._bluetooth_scan_message = f'绑定失败：{exc}'
+                    self._notify_update()
+            return
+        if action == DEVICE_COMMAND_UNBIND_BLUETOOTH:
+            device_id = str(payload.get('device_id', '') or '').strip()
+            if device_id:
+                self._unbind_bluetooth(device_id)
             return
         if action == DEVICE_COMMAND_REFRESH_TRAY_ICON:
             # 托盘图标显示逻辑属于纯配置切换，不需要重扫 HID；
@@ -785,6 +917,26 @@ def _serialize_keyboard_state(keyboard: Optional[KeyboardInfo]) -> Optional[dict
     }
 
 
+def _serialize_bluetooth_candidate(candidate: BluetoothCandidate) -> dict:
+    return {
+        'device_id': candidate.device_id,
+        'name': candidate.name,
+        'connected': candidate.connected,
+    }
+
+
+def _serialize_bluetooth_state(device: BluetoothInfo) -> dict:
+    return {
+        'device_id': device.device_id,
+        'name': device.name,
+        'percentage': device.percentage,
+        'charging': device.charging,
+        'status_text': device.status_text,
+        'online': device.online,
+        'last_update': device.last_update,
+    }
+
+
 def _coerce_shared_bool(value) -> bool:
     """把共享状态里的布尔字段转成稳定布尔值。"""
     if isinstance(value, bool):
@@ -879,6 +1031,40 @@ def _deserialize_keyboard_state(item: dict | None) -> Optional[KeyboardInfo]:
     )
 
 
+def _deserialize_bluetooth_candidate(item: dict) -> Optional[BluetoothCandidate]:
+    if not isinstance(item, dict):
+        return None
+    device_id = str(item.get('device_id', '') or '').strip()
+    if not device_id:
+        return None
+    return BluetoothCandidate(
+        device_id=device_id,
+        name=str(item.get('name', '') or '未知蓝牙设备'),
+        connected=_coerce_shared_bool(item.get('connected', False)),
+    )
+
+
+def _deserialize_bluetooth_state(item: dict) -> Optional[BluetoothInfo]:
+    if not isinstance(item, dict):
+        return None
+    device_id = str(item.get('device_id', '') or '').strip()
+    if not device_id:
+        return None
+    try:
+        last_update = float(item.get('last_update', 0) or 0)
+    except (TypeError, ValueError):
+        last_update = 0.0
+    return BluetoothInfo(
+        device_id=device_id,
+        name=str(item.get('name', '') or '未知蓝牙设备'),
+        percentage=_coerce_shared_percentage(item.get('percentage', -1)),
+        charging=_coerce_shared_bool(item.get('charging', False)),
+        status_text=str(item.get('status_text', '') or '未连接'),
+        online=_coerce_shared_bool(item.get('online', False)),
+        last_update=last_update,
+    )
+
+
 class SharedStateDeviceManager:
     """
     只读的设备管理器，通过读取共享状态文件获取数据。
@@ -889,6 +1075,10 @@ class SharedStateDeviceManager:
         self._mice: list[MouseInfo] = []
         self._keyboard: Optional[KeyboardInfo] = None
         self._keyboard_candidates: list[KeyboardCandidate] = []
+        self._bluetooth_devices: list[BluetoothInfo] = []
+        self._bluetooth_candidates: list[BluetoothCandidate] = []
+        self._bluetooth_scan_state = 'idle'
+        self._bluetooth_scan_message = ''
         self._lock = threading.Lock()
         self._on_update_callbacks: list[Callable] = []
         self._auto_refresh_running = False
@@ -924,6 +1114,26 @@ class SharedStateDeviceManager:
     def keyboard_scan_message(self) -> str:
         with self._lock:
             return getattr(self, '_keyboard_scan_message', '')
+
+    @property
+    def bluetooth_devices(self) -> list[BluetoothInfo]:
+        with self._lock:
+            return list(self._bluetooth_devices)
+
+    @property
+    def bluetooth_candidates(self) -> list[BluetoothCandidate]:
+        with self._lock:
+            return list(self._bluetooth_candidates)
+
+    @property
+    def bluetooth_scan_state(self) -> str:
+        with self._lock:
+            return self._bluetooth_scan_state
+
+    @property
+    def bluetooth_scan_message(self) -> str:
+        with self._lock:
+            return self._bluetooth_scan_message
 
     @property
     def last_read_state(self) -> str:
@@ -985,6 +1195,10 @@ class SharedStateDeviceManager:
             keyboard_candidates: list[KeyboardCandidate] = []
             keyboard_scan_state = 'idle'
             keyboard_scan_message = ''
+            bluetooth_devices: list[BluetoothInfo] = []
+            bluetooth_candidates: list[BluetoothCandidate] = []
+            bluetooth_scan_state = 'idle'
+            bluetooth_scan_message = ''
 
             # 兼容旧版共享状态：根节点为纯鼠标数组。
             if isinstance(data, list):
@@ -1000,6 +1214,20 @@ class SharedStateDeviceManager:
                 ]
                 keyboard_scan_state = str(data.get('keyboard_scan_state', 'idle') or 'idle')
                 keyboard_scan_message = str(data.get('keyboard_scan_message', '') or '')
+                bluetooth_devices = [
+                    device for device in (
+                        _deserialize_bluetooth_state(item) for item in data.get('bluetooth_devices', [])
+                    )
+                    if device is not None
+                ]
+                bluetooth_candidates = [
+                    candidate for candidate in (
+                        _deserialize_bluetooth_candidate(item) for item in data.get('bluetooth_candidates', [])
+                    )
+                    if candidate is not None
+                ]
+                bluetooth_scan_state = str(data.get('bluetooth_scan_state', 'idle') or 'idle')
+                bluetooth_scan_message = str(data.get('bluetooth_scan_message', '') or '')
             else:
                 raise ValueError(f"共享状态文件根节点类型不支持: {type(data).__name__}")
 
@@ -1014,6 +1242,10 @@ class SharedStateDeviceManager:
                 self._keyboard_candidates = keyboard_candidates
                 self._keyboard_scan_state = keyboard_scan_state
                 self._keyboard_scan_message = keyboard_scan_message
+                self._bluetooth_devices = bluetooth_devices
+                self._bluetooth_candidates = bluetooth_candidates
+                self._bluetooth_scan_state = bluetooth_scan_state
+                self._bluetooth_scan_message = bluetooth_scan_message
                 self._last_read_state = 'ok'
                 self._last_read_error = ''
         except Exception as e:

@@ -71,6 +71,7 @@ class ConfigManager:
             "notified_levels": {}, # 记录每个鼠标上次被通知时的电量，防重复弹窗
             "auto_update": False, # 默认不自动更新
             "keyboard_binding": None, # 单键盘绑定信息，供 tray 进程读取指定 HID 接口
+            "bluetooth_bindings": [], # 多个标准 BLE Battery Service 设备绑定
             "tray_icon_priority": TRAY_ICON_PRIORITY_MOUSE_FIRST, # 托盘图标显示逻辑
             "ui_language": LANGUAGE_AUTO, # 界面语言策略：默认跟随系统语言，手动切换后写入显式覆盖值
         }
@@ -206,6 +207,55 @@ class ConfigManager:
             "product_name": str(binding.get("product_name", "") or ""),
         }
         self.save()
+
+    @property
+    def bluetooth_bindings(self) -> list[dict]:
+        """返回按 Windows device ID 去重后的 BLE 设备绑定。"""
+        self._reload_from_disk()
+        raw_bindings = self.config.get('bluetooth_bindings', [])
+        if not isinstance(raw_bindings, list):
+            return []
+
+        bindings: list[dict] = []
+        seen_ids: set[str] = set()
+        for item in raw_bindings:
+            if not isinstance(item, dict):
+                continue
+            device_id = str(item.get('device_id', '') or '').strip()
+            if not device_id or device_id in seen_ids:
+                continue
+            seen_ids.add(device_id)
+            bindings.append({
+                'device_id': device_id,
+                'name': str(item.get('name', '') or '未知蓝牙设备'),
+            })
+        return bindings
+
+    def add_bluetooth_binding(self, binding: dict) -> bool:
+        device_id = str(binding.get('device_id', '') or '').strip()
+        if not device_id:
+            logger.warning('忽略空的蓝牙设备绑定')
+            return False
+        bindings = self.bluetooth_bindings
+        if any(item['device_id'] == device_id for item in bindings):
+            return False
+        bindings.append({
+            'device_id': device_id,
+            'name': str(binding.get('name', '') or '未知蓝牙设备'),
+        })
+        self.config['bluetooth_bindings'] = bindings
+        self.save()
+        return True
+
+    def remove_bluetooth_binding(self, device_id: str) -> bool:
+        device_id = str(device_id or '').strip()
+        bindings = self.bluetooth_bindings
+        remaining = [item for item in bindings if item['device_id'] != device_id]
+        if len(remaining) == len(bindings):
+            return False
+        self.config['bluetooth_bindings'] = remaining
+        self.save()
+        return True
 
     @property
     def tray_icon_priority(self) -> str:

@@ -211,6 +211,12 @@ def extend_pyinstaller_for_private_core(cmd: list[str], private_core_module, ref
         '--hidden-import', f'{import_name}.razer_hid',
         '--hidden-import', f'{import_name}.keyboard_hid',
         '--collect-submodules', import_name,
+        # BLE 实现在私有 core 内使用延迟导入；构建器需显式收集其 WinRT 运行时模块。
+        '--collect-submodules', 'winrt',
+        '--hidden-import', 'winrt.windows.devices.enumeration',
+        '--hidden-import', 'winrt.windows.devices.bluetooth',
+        '--hidden-import', 'winrt.windows.devices.bluetooth.genericattributeprofile',
+        '--hidden-import', 'winrt.windows.storage.streams',
     ])
 
 def build():

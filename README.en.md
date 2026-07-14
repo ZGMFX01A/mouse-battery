@@ -16,6 +16,7 @@ A lightweight Windows tray utility for monitoring battery status of Logitech and
 - **Automatic refresh**: Detects connected devices and refreshes battery data periodically.
 - **Multi-brand support**: Designed for Logitech and Razer 2.4G wireless mice.
 - **Mechanical keyboard extension**: Supports battery reading and binding for Weikav (Huafenda) dual-8K mechanical keyboard solutions.
+- **Standard BLE battery devices**: Add multiple Windows-paired devices and read battery levels through the standard Battery Service (GATT `0x180F`); sleeping devices remain visible in the picker.
 - **Quick tray actions**: Refresh now, open settings, or exit from the tray menu.
 - **Low-battery alerts**: Helps you avoid unexpected power loss during use.
 - **Persistent preferences**: Saves notification threshold, tray icon priority, auto update, and other settings.
@@ -23,6 +24,10 @@ A lightweight Windows tray utility for monitoring battery status of Logitech and
 - **Auto update**: Supports update checking and automatic update flow.
 
 ## 🖱️ Supported Devices
+
+### Bluetooth LE
+
+Supports paired devices that expose the standard BLE Battery Service (GATT `0x180F` / `0x2A19`) to Windows. Devices using vendor-private protocols or not exposing battery data to Windows are not supported.
 
 ### Razer
 

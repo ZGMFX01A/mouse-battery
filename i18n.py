@@ -158,6 +158,10 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '新增键盘',
         LANGUAGE_EN_US: 'Add Keyboard',
     },
+    'action.add_bluetooth': {
+        LANGUAGE_ZH_CN: '添加蓝牙设备',
+        LANGUAGE_EN_US: 'Add Bluetooth Device',
+    },
     'dialog.ok': {
         LANGUAGE_ZH_CN: '确定',
         LANGUAGE_EN_US: 'OK',
@@ -173,6 +177,10 @@ _TRANSLATIONS = {
     'dialog.connect': {
         LANGUAGE_ZH_CN: '连接',
         LANGUAGE_EN_US: 'Connect',
+    },
+    'dialog.add': {
+        LANGUAGE_ZH_CN: '添加',
+        LANGUAGE_EN_US: 'Add',
     },
     'view.empty.default_title': {
         LANGUAGE_ZH_CN: '未发现鼠标设备',
@@ -406,6 +414,98 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '提交键盘扫描请求失败：{error}',
         LANGUAGE_EN_US: 'Failed to submit the keyboard scan request: {error}',
     },
+    'bluetooth.dialog.loading': {
+        LANGUAGE_ZH_CN: '正在读取 Windows 已配对蓝牙设备...',
+        LANGUAGE_EN_US: 'Reading paired Bluetooth devices from Windows...',
+    },
+    'bluetooth.dialog.empty_title': {
+        LANGUAGE_ZH_CN: '未发现已配对蓝牙设备',
+        LANGUAGE_EN_US: 'No Paired Bluetooth Devices',
+    },
+    'bluetooth.dialog.empty_message': {
+        LANGUAGE_ZH_CN: '请先在 Windows 设置中完成蓝牙配对，然后重试。',
+        LANGUAGE_EN_US: 'Pair the device in Windows Settings first, then try again.',
+    },
+    'bluetooth.dialog.helper': {
+        LANGUAGE_ZH_CN: '列表包含当前未连接或休眠的设备。仅支持公开标准 BLE Battery Service（0x180F）的设备。',
+        LANGUAGE_EN_US: 'The list includes disconnected or sleeping devices. Only the standard BLE Battery Service (0x180F) is supported.',
+    },
+    'bluetooth.dialog.option': {
+        LANGUAGE_ZH_CN: '{name} · {status}',
+        LANGUAGE_EN_US: '{name} · {status}',
+    },
+    'bluetooth.status.connected': {
+        LANGUAGE_ZH_CN: '当前已连接',
+        LANGUAGE_EN_US: 'Connected',
+    },
+    'bluetooth.status.sleeping': {
+        LANGUAGE_ZH_CN: '未连接 / 可能休眠',
+        LANGUAGE_EN_US: 'Disconnected / may be sleeping',
+    },
+    'bluetooth.status.added': {
+        LANGUAGE_ZH_CN: ' · 已添加',
+        LANGUAGE_EN_US: ' · Added',
+    },
+    'bluetooth.state.paired_sleeping': {
+        LANGUAGE_ZH_CN: '已配对，未连接或休眠',
+        LANGUAGE_EN_US: 'Paired, disconnected or sleeping',
+    },
+    'bluetooth.state.not_paired': {
+        LANGUAGE_ZH_CN: '未在 Windows 已配对设备中找到',
+        LANGUAGE_EN_US: 'Not found in Windows paired devices',
+    },
+    'bluetooth.state.no_service': {
+        LANGUAGE_ZH_CN: '设备未公开标准 BLE Battery Service（0x180F）。',
+        LANGUAGE_EN_US: 'The device does not expose the standard BLE Battery Service (0x180F).',
+    },
+    'bluetooth.state.no_level': {
+        LANGUAGE_ZH_CN: '设备未公开可读的 Battery Level（0x2A19）。',
+        LANGUAGE_EN_US: 'The device does not expose a readable Battery Level (0x2A19).',
+    },
+    'bluetooth.select.title': {
+        LANGUAGE_ZH_CN: '添加蓝牙设备',
+        LANGUAGE_EN_US: 'Add Bluetooth Device',
+    },
+    'bluetooth.select_required.title': {
+        LANGUAGE_ZH_CN: '请选择设备',
+        LANGUAGE_EN_US: 'Select a Device',
+    },
+    'bluetooth.select_required.message': {
+        LANGUAGE_ZH_CN: '请先选择一个尚未添加的蓝牙设备。',
+        LANGUAGE_EN_US: 'Select a Bluetooth device that has not been added yet.',
+    },
+    'bluetooth.bind.failed.title': {
+        LANGUAGE_ZH_CN: '添加蓝牙设备失败',
+        LANGUAGE_EN_US: 'Add Bluetooth Device Failed',
+    },
+    'bluetooth.bind.failed.message': {
+        LANGUAGE_ZH_CN: '提交蓝牙绑定请求失败：{error}',
+        LANGUAGE_EN_US: 'Failed to submit the Bluetooth bind request: {error}',
+    },
+    'bluetooth.add.failed.title': {
+        LANGUAGE_ZH_CN: '扫描蓝牙设备失败',
+        LANGUAGE_EN_US: 'Bluetooth Scan Failed',
+    },
+    'bluetooth.add.failed.message': {
+        LANGUAGE_ZH_CN: '提交蓝牙扫描请求失败：{error}',
+        LANGUAGE_EN_US: 'Failed to submit the Bluetooth scan request: {error}',
+    },
+    'bluetooth.remove.title': {
+        LANGUAGE_ZH_CN: '移除蓝牙设备',
+        LANGUAGE_EN_US: 'Remove Bluetooth Device',
+    },
+    'bluetooth.remove.message': {
+        LANGUAGE_ZH_CN: '确认移除这台蓝牙设备吗？之后可从已配对设备列表重新添加。',
+        LANGUAGE_EN_US: 'Remove this Bluetooth device? You can add it again from the paired-device list.',
+    },
+    'bluetooth.remove.failed.title': {
+        LANGUAGE_ZH_CN: '移除蓝牙设备失败',
+        LANGUAGE_EN_US: 'Remove Bluetooth Device Failed',
+    },
+    'bluetooth.remove.failed.message': {
+        LANGUAGE_ZH_CN: '提交移除请求失败：{error}',
+        LANGUAGE_EN_US: 'Failed to submit the remove request: {error}',
+    },
     'update.timeout.title': {
         LANGUAGE_ZH_CN: '网络超时',
         LANGUAGE_EN_US: 'Network Timeout',
@@ -499,8 +599,8 @@ _TRANSLATIONS = {
         LANGUAGE_EN_US: 'No device found or devices are sleeping',
     },
     'tray.notification.low_battery_title': {
-        LANGUAGE_ZH_CN: '鼠标电量告警',
-        LANGUAGE_EN_US: 'Mouse Battery Alert',
+        LANGUAGE_ZH_CN: '设备电量告警',
+        LANGUAGE_EN_US: 'Device Battery Alert',
     },
     'tray.notification.low_battery_message': {
         LANGUAGE_ZH_CN: '{name} 当前电量只有 {percent}%，请及时充电！',
@@ -548,6 +648,11 @@ _RUNTIME_TEXT_KEYS = {
     '放电中': 'status.discharging',
     '未找到已绑定键盘': 'keyboard.bound_not_found',
     '读取失败': 'keyboard.read_failed',
+    '已连接': 'bluetooth.status.connected',
+    '已配对，未连接或休眠': 'bluetooth.state.paired_sleeping',
+    '未在 Windows 已配对设备中找到': 'bluetooth.state.not_paired',
+    '设备未公开标准 BLE Battery Service（0x180F）。': 'bluetooth.state.no_service',
+    '设备未公开可读的 Battery Level（0x2A19）。': 'bluetooth.state.no_level',
     '尚未收到托盘进程写入的设备状态，请确认主程序正在运行。': 'shared_state.missing',
     '读取共享状态失败，当前显示上次有效结果。请稍后重试或确认托盘进程是否正常。': 'shared_state.read_failed_keep_last',
     '正在扫描键盘候选设备...': 'keyboard.scan.loading_runtime',

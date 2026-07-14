@@ -24,9 +24,12 @@ from devices import (
     DEVICE_COMMAND_SCAN_KEYBOARD_CANDIDATES,
     DEVICE_COMMAND_BIND_KEYBOARD,
     DEVICE_COMMAND_UNBIND_KEYBOARD,
+    DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES,
+    DEVICE_COMMAND_BIND_BLUETOOTH,
+    DEVICE_COMMAND_UNBIND_BLUETOOTH,
     DEVICE_COMMAND_REFRESH_TRAY_ICON,
 )
-from core_bridge import KeyboardInfo, KeyboardCandidate
+from core_bridge import BluetoothCandidate, BluetoothInfo, KeyboardInfo, KeyboardCandidate
 from config import (
     ConfigManager,
     APP_VERSION,
@@ -658,6 +661,8 @@ class MouseBatteryApp:
         self.check_update_btn_row: Optional[ft.Row] = None
         self.add_keyboard_btn: Optional[ft.Container] = None
         self.add_keyboard_btn_row: Optional[ft.Row] = None
+        self.add_bluetooth_btn: Optional[ft.Container] = None
+        self.add_bluetooth_btn_row: Optional[ft.Row] = None
         self.notify_threshold_control: Optional[ft.Container] = None
         self.tray_icon_priority_control: Optional[ft.Container] = None
         self.status_text: Optional[ft.Text] = None
@@ -666,6 +671,10 @@ class MouseBatteryApp:
         self._keyboard_bind_action: Optional[ft.TextButton] = None
         self._keyboard_selected_device_id = ''
         self._keyboard_dialog_loading = False
+        self._bluetooth_dialog: Optional[ft.AlertDialog] = None
+        self._bluetooth_bind_action: Optional[ft.TextButton] = None
+        self._bluetooth_selected_device_id = ''
+        self._bluetooth_dialog_loading = False
         # 动作按钮忙碌标记：Container.disabled 在 Flet 中无法拦截 on_click，
         # 这里用显式锁替代，避免扫描/刷新/检查更新在执行中被重复点击触发并发。
         self._scan_busy = False
@@ -720,6 +729,8 @@ class MouseBatteryApp:
         self.check_update_btn_row = None
         self.add_keyboard_btn = None
         self.add_keyboard_btn_row = None
+        self.add_bluetooth_btn = None
+        self.add_bluetooth_btn_row = None
         self.notify_threshold_control = None
         self.tray_icon_priority_control = None
         self.status_text = None
@@ -727,6 +738,10 @@ class MouseBatteryApp:
         self._keyboard_dialog = None
         self._keyboard_bind_action = None
         self._keyboard_selected_device_id = ''
+        self._bluetooth_dialog = None
+        self._bluetooth_bind_action = None
+        self._bluetooth_selected_device_id = ''
+        self._bluetooth_dialog_loading = False
         self._last_render_signature = None
         self.build(self.page, initial_scan=False, auto_refresh_enabled=auto_refresh_enabled)
 
@@ -817,6 +832,18 @@ class MouseBatteryApp:
             self._translate_runtime_text(getattr(self.device_manager, 'keyboard_scan_message', '')),
         )
 
+    def _bluetooth_devices_snapshot(self) -> list[BluetoothInfo]:
+        return list(getattr(self.device_manager, 'bluetooth_devices', []) or [])
+
+    def _bluetooth_candidates_snapshot(self) -> list[BluetoothCandidate]:
+        return list(getattr(self.device_manager, 'bluetooth_candidates', []) or [])
+
+    def _bluetooth_scan_state(self) -> tuple[str, str]:
+        return (
+            getattr(self.device_manager, 'bluetooth_scan_state', 'idle'),
+            self._translate_runtime_text(getattr(self.device_manager, 'bluetooth_scan_message', '')),
+        )
+
     def _device_signature(self, mice: list[MouseInfo]):
         """生成当前设备列表的轻量签名，用于判断是否需要整列表重建。"""
         return tuple(
@@ -847,12 +874,33 @@ class MouseBatteryApp:
             keyboard.device_id,
         )
 
-    def _build_device_view_controls(self, mice: list[MouseInfo], keyboard: Optional[KeyboardInfo]):
+    @staticmethod
+    def _bluetooth_signature(devices: list[BluetoothInfo]):
+        return tuple(
+            (
+                item.device_id,
+                item.name,
+                item.percentage,
+                item.status_text,
+                item.online,
+                round(item.last_update, 2),
+            )
+            for item in devices
+        )
+
+    def _build_device_view_controls(self, mice: list[MouseInfo], keyboard: Optional[KeyboardInfo],
+                                    bluetooth_devices: list[BluetoothInfo]):
         """根据当前界面状态构建设备列表区域控件。"""
-        if mice or keyboard:
+        if mice or keyboard or bluetooth_devices:
             controls = [build_mouse_card(mouse, app_ref=self) for mouse in mice]
             if keyboard is not None:
                 controls.append(build_keyboard_card(keyboard, on_remove=self._on_remove_keyboard_click, app_ref=self))
+            for device in bluetooth_devices:
+                controls.append(build_keyboard_card(
+                    device,
+                    on_remove=lambda e, device_id=device.device_id: self._on_remove_bluetooth_click(device_id),
+                    app_ref=self,
+                ))
             return controls
 
         if self._view_state == 'loading':
@@ -901,7 +949,8 @@ class MouseBatteryApp:
         else:
             self._set_btn_disabled_visual(self.refresh_btn_row, refresh_disabled, ft.Icons.REFRESH, self._t('action.refresh'))
 
-    def _status_bar_message(self, mice: list[MouseInfo], keyboard: Optional[KeyboardInfo]) -> str:
+    def _status_bar_message(self, mice: list[MouseInfo], keyboard: Optional[KeyboardInfo],
+                            bluetooth_devices: list[BluetoothInfo]) -> str:
         """根据当前视图状态生成底部状态栏文案。"""
         if self._view_state == 'loading':
             return self._view_message or self._t('status.syncing')
@@ -909,7 +958,7 @@ class MouseBatteryApp:
             return self._view_message or self._t('status.read_failed')
         if self._view_state == 'ready' and self._view_message:
             return self._view_message
-        total = len(mice) + (1 if keyboard else 0)
+        total = len(mice) + (1 if keyboard else 0) + len(bluetooth_devices)
         return self._t('status.devices_found', count=total) if total else self._t('status.no_devices')
 
     def _on_tray_icon_priority_change(self, value: str):
@@ -1089,6 +1138,158 @@ class MouseBatteryApp:
             return
         self._keyboard_selected_device_id = ''
         self._open_keyboard_picker_dialog()
+
+    def _on_bluetooth_candidate_change(self, e):
+        self._bluetooth_selected_device_id = e.control.value or ''
+
+    def _close_bluetooth_dialog(self, e=None):
+        if self._bluetooth_dialog:
+            self._bluetooth_dialog.open = False
+        self._bluetooth_bind_action = None
+        self._bluetooth_dialog_loading = False
+        self._safe_update()
+
+    def _build_bluetooth_dialog_content(self):
+        scan_state, scan_message = self._bluetooth_scan_state()
+        candidates = self._bluetooth_candidates_snapshot()
+        bound_ids = {item.device_id for item in self._bluetooth_devices_snapshot()}
+        available = [item for item in candidates if item.device_id not in bound_ids]
+        if not self._bluetooth_selected_device_id and available:
+            self._bluetooth_selected_device_id = available[0].device_id
+
+        if self._bluetooth_dialog_loading or scan_state == 'loading':
+            return ft.Column(
+                controls=[
+                    ft.ProgressRing(width=26, height=26, color=COLORS['accent_green']),
+                    ft.Text(scan_message or self._t('bluetooth.dialog.loading'), size=13, color=COLORS['text_secondary']),
+                ],
+                tight=True,
+                spacing=14,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+        if not candidates:
+            return ft.Column(
+                controls=[
+                    ft.Text(self._t('bluetooth.dialog.empty_title'), size=15, weight=ft.FontWeight.W_600),
+                    ft.Text(scan_message or self._t('bluetooth.dialog.empty_message'), size=13, color=COLORS['text_secondary']),
+                ],
+                tight=True,
+                spacing=10,
+            )
+
+        controls = []
+        if scan_state == 'error':
+            controls.append(ft.Text(scan_message, size=13, color=COLORS['destructive']))
+        controls.append(ft.Text(self._t('bluetooth.dialog.helper'), size=13, color=COLORS['text_secondary']))
+        controls.append(ft.RadioGroup(
+            value=self._bluetooth_selected_device_id,
+            on_change=self._on_bluetooth_candidate_change,
+            content=ft.Column(
+                controls=[
+                    ft.Radio(
+                        value=item.device_id,
+                        disabled=item.device_id in bound_ids,
+                        label=self._t(
+                            'bluetooth.dialog.option',
+                            name=item.name,
+                            status=self._t(
+                                'bluetooth.status.connected' if item.connected else 'bluetooth.status.sleeping'
+                            ) + (self._t('bluetooth.status.added') if item.device_id in bound_ids else ''),
+                        ),
+                    )
+                    for item in candidates
+                ],
+                tight=True,
+                spacing=8,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+        ))
+        return ft.Column(controls=controls, tight=True, spacing=12, height=320)
+
+    def _refresh_bluetooth_dialog(self):
+        if not self._bluetooth_dialog or not self._bluetooth_dialog.open:
+            return
+        scan_state, _ = self._bluetooth_scan_state()
+        if scan_state == 'bound':
+            self._close_bluetooth_dialog()
+            return
+        if scan_state != 'loading':
+            self._bluetooth_dialog_loading = False
+        self._bluetooth_dialog.content = self._build_bluetooth_dialog_content()
+        if self._bluetooth_bind_action:
+            available_ids = {
+                item.device_id for item in self._bluetooth_candidates_snapshot()
+            } - {
+                item.device_id for item in self._bluetooth_devices_snapshot()
+            }
+            self._bluetooth_bind_action.disabled = (
+                scan_state == 'loading' or self._bluetooth_selected_device_id not in available_ids
+            )
+
+    def _on_bind_bluetooth_click(self, e):
+        device_id = self._bluetooth_selected_device_id.strip()
+        if not device_id:
+            self._show_dialog(self._t('bluetooth.select_required.title'), self._t('bluetooth.select_required.message'))
+            return
+        try:
+            request_device_command(DEVICE_COMMAND_BIND_BLUETOOTH, {'device_id': device_id})
+        except Exception as exc:
+            logger.error('提交蓝牙绑定命令失败: %s', exc)
+            self._show_dialog(self._t('bluetooth.bind.failed.title'), self._t('bluetooth.bind.failed.message', error=exc))
+            return
+        self._bluetooth_dialog_loading = True
+        self._refresh_bluetooth_dialog()
+        self._safe_update()
+
+    def _open_bluetooth_picker_dialog(self):
+        self._bluetooth_bind_action = ft.TextButton(self._t('dialog.add'), on_click=self._on_bind_bluetooth_click)
+        self._bluetooth_dialog = ft.AlertDialog(
+            title=ft.Text(self._t('bluetooth.select.title'), color=COLORS['text_primary']),
+            content=self._build_bluetooth_dialog_content(),
+            actions=[
+                self._bluetooth_bind_action,
+                ft.TextButton(self._t('dialog.cancel'), on_click=self._close_bluetooth_dialog),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            shape=ft.RoundedRectangleBorder(radius=14),
+        )
+        self.page.show_dialog(self._bluetooth_dialog)
+
+    def _on_add_bluetooth_click(self, e):
+        self._bluetooth_dialog_loading = True
+        self._bluetooth_selected_device_id = ''
+        try:
+            request_device_command(DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES)
+        except Exception as exc:
+            self._bluetooth_dialog_loading = False
+            logger.error('提交蓝牙扫描命令失败: %s', exc)
+            self._show_dialog(self._t('bluetooth.add.failed.title'), self._t('bluetooth.add.failed.message', error=exc))
+            return
+        self._open_bluetooth_picker_dialog()
+
+    def _on_remove_bluetooth_click(self, device_id: str):
+        def confirm_remove(e):
+            try:
+                request_device_command(DEVICE_COMMAND_UNBIND_BLUETOOTH, {'device_id': device_id})
+            except Exception as exc:
+                logger.error('提交移除蓝牙设备命令失败: %s', exc)
+                self._show_dialog(self._t('bluetooth.remove.failed.title'), self._t('bluetooth.remove.failed.message', error=exc))
+            dialog.open = False
+            self._safe_update()
+
+        def cancel(e):
+            dialog.open = False
+            self._safe_update()
+
+        dialog = self._show_dialog(
+            self._t('bluetooth.remove.title'),
+            self._t('bluetooth.remove.message'),
+            actions=[
+                ft.TextButton(self._t('dialog.remove'), on_click=confirm_remove),
+                ft.TextButton(self._t('dialog.cancel'), on_click=cancel),
+            ],
+        )
 
     def _on_check_update_click(self, e):
         """检查版本更新。
@@ -1433,6 +1634,9 @@ class MouseBatteryApp:
         self.add_keyboard_btn_row = self._make_btn_content(ft.Icons.KEYBOARD_OUTLINED, self._t('action.add_keyboard'), color=COLORS['text_primary'])
         self.add_keyboard_btn = build_action_button(self.add_keyboard_btn_row, primary=False, on_click=self._on_add_keyboard_click)
 
+        self.add_bluetooth_btn_row = self._make_btn_content(ft.Icons.BLUETOOTH, self._t('action.add_bluetooth'), color=COLORS['text_primary'])
+        self.add_bluetooth_btn = build_action_button(self.add_bluetooth_btn_row, primary=False, on_click=self._on_add_bluetooth_click)
+
         # 自动刷新开关：会话级开关，默认开启。
         # 故意不持久化：与「开机自启」「自动检查更新」不同，此项控制的是当前 GUI 会话内
         # 是否周期刷新电量，重启后恢复默认开启更符合「插上鼠标就想看电量」的预期。
@@ -1539,9 +1743,11 @@ class MouseBatteryApp:
                 self.scan_btn,
                 self.refresh_btn,
                 self.add_keyboard_btn,
+                self.add_bluetooth_btn,
                 self.check_update_btn,
             ],
             spacing=12,
+            wrap=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
@@ -1681,15 +1887,16 @@ class MouseBatteryApp:
 
         mice = self.device_manager.mice
         keyboard = self._keyboard_snapshot()
+        bluetooth_devices = self._bluetooth_devices_snapshot()
         read_state, read_message = self._shared_state_read_status()
 
         if read_state == 'error':
-            if mice or keyboard:
+            if mice or keyboard or bluetooth_devices:
                 # 已有旧快照时保留设备卡片，但需要在状态栏显式提示当前数据可能不是最新的。
                 self._set_view_state('ready', read_message)
             else:
                 self._set_view_state('error', read_message)
-        elif mice or keyboard:
+        elif mice or keyboard or bluetooth_devices:
             self._set_view_state('ready')
         elif read_state == 'missing':
             # 缺失共享状态文件不再无限停留在 loading；首轮读取后明确展示“尚未同步”。
@@ -1702,19 +1909,21 @@ class MouseBatteryApp:
             self._view_message,
             self._device_signature(mice),
             self._keyboard_signature(keyboard),
+            self._bluetooth_signature(bluetooth_devices),
         )
         if force_rebuild or self._last_render_signature != render_signature:
             self.card_list.controls.clear()
-            self.card_list.controls.extend(self._build_device_view_controls(mice, keyboard))
+            self.card_list.controls.extend(self._build_device_view_controls(mice, keyboard, bluetooth_devices))
             self._last_render_signature = render_signature
 
         self._refresh_keyboard_dialog()
+        self._refresh_bluetooth_dialog()
 
         # 按钮状态由统一入口恢复，避免扫描/刷新/自动更新互相覆盖文案。
         self._sync_action_buttons()
 
         if self.status_text:
-            self.status_text.value = self._status_bar_message(mice, keyboard)
+            self.status_text.value = self._status_bar_message(mice, keyboard, bluetooth_devices)
 
         self._safe_update()
 

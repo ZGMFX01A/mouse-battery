@@ -250,13 +250,15 @@ class TrayApp:
             return
         mice = self.device_manager.mice
         keyboard = self.device_manager.keyboard
-        if not mice and not keyboard:
+        bluetooth_devices = self.device_manager.bluetooth_devices
+        if not mice and not keyboard and not bluetooth_devices:
             self._tray.icon = create_battery_icon(-1)
             self._tray.title = f"{self._t('tray.app_name')}\n{self._t('tray.no_device_or_sleep')}"
         else:
             valid_mice = [m for m in mice if m.percentage >= 0]
             valid_keyboard = keyboard if keyboard and keyboard.percentage >= 0 else None
-            icon_target = self._select_icon_target(valid_mice, valid_keyboard)
+            valid_bluetooth = [item for item in bluetooth_devices if item.percentage >= 0]
+            icon_target = self._select_icon_target(valid_mice, valid_keyboard, valid_bluetooth)
             if not icon_target:
                 self._tray.icon = create_battery_icon(-1)
             else:
@@ -286,11 +288,26 @@ class TrayApp:
                 c = " ⚡" if keyboard.charging else ""
                 lines.append(f"{self._translate_runtime_text(keyboard.name)}: {p}{c}")
 
+            for device in bluetooth_devices:
+                p = f'{device.percentage}%' if device.percentage >= 0 else 'N/A'
+                lines.append(f'{device.name}: {p}')
+                if device.percentage >= 0 and self.config_manager.should_notify(
+                    f'Bluetooth|{device.device_id}', device.percentage
+                ):
+                    try:
+                        self._tray.notify(
+                            self._t('tray.notification.low_battery_message', name=device.name, percent=device.percentage),
+                            title=self._t('tray.notification.low_battery_title'),
+                        )
+                    except Exception as exc:
+                        logger.error('蓝牙设备低电量通知失败: %s', exc)
+
             # Windows tooltip 上限约 128 字符，做安全截断避免乱码
             self._tray.title = "\n".join(lines)[:120]
         self._tray.menu = self._build_menu()
 
-    def _select_icon_target(self, valid_mice: list[MouseInfo], valid_keyboard) -> Optional[dict]:
+    def _select_icon_target(self, valid_mice: list[MouseInfo], valid_keyboard,
+                            valid_bluetooth=None) -> Optional[dict]:
         """根据配置选择当前托盘图标要显示哪一台设备的电量。
 
         三种策略分别对应用户在设置面板中的选择：
@@ -301,6 +318,10 @@ class TrayApp:
         priority = self.config_manager.tray_icon_priority
         mouse_low = min(valid_mice, key=lambda item: item.percentage) if valid_mice else None
         keyboard_target = None
+        bluetooth_targets = [
+            {'percentage': item.percentage, 'charging': item.charging}
+            for item in (valid_bluetooth or [])
+        ]
         if valid_keyboard:
             keyboard_target = {
                 'percentage': valid_keyboard.percentage,
@@ -312,7 +333,7 @@ class TrayApp:
                 return keyboard_target
             if mouse_low:
                 return {'percentage': mouse_low.percentage, 'charging': mouse_low.charging}
-            return None
+            return min(bluetooth_targets, key=lambda item: item['percentage']) if bluetooth_targets else None
 
         if priority == TRAY_ICON_PRIORITY_LOWEST_BATTERY:
             samples = []
@@ -320,6 +341,7 @@ class TrayApp:
                 samples.append({'percentage': mouse_low.percentage, 'charging': mouse_low.charging})
             if keyboard_target:
                 samples.append(keyboard_target)
+            samples.extend(bluetooth_targets)
             if not samples:
                 return None
             return min(samples, key=lambda item: item['percentage'])
@@ -327,18 +349,30 @@ class TrayApp:
         # 默认策略：优先鼠标，再退回键盘。
         if mouse_low:
             return {'percentage': mouse_low.percentage, 'charging': mouse_low.charging}
-        return keyboard_target
+        if keyboard_target:
+            return keyboard_target
+        if bluetooth_targets:
+            return min(bluetooth_targets, key=lambda item: item['percentage'])
+        return None
 
     def _build_menu(self) -> Menu:
         items = []
         mice = self.device_manager.mice
-        if mice:
+        keyboard = self.device_manager.keyboard
+        bluetooth_devices = self.device_manager.bluetooth_devices
+        if mice or keyboard or bluetooth_devices:
             for m in mice:
                 p = f"{m.percentage}%" if m.percentage >= 0 else "N/A"
                 c = self._t('tray.menu.charging_suffix') if m.charging else ""
                 items.append(MenuItem(
                     f"[{self._translate_brand_name(m.brand.value)}] {self._translate_runtime_text(m.name)}: {p}{c}", None, enabled=False
                 ))
+            if keyboard:
+                p = f'{keyboard.percentage}%' if keyboard.percentage >= 0 else 'N/A'
+                items.append(MenuItem(f'[Keyboard] {self._translate_runtime_text(keyboard.name)}: {p}', None, enabled=False))
+            for device in bluetooth_devices:
+                p = f'{device.percentage}%' if device.percentage >= 0 else 'N/A'
+                items.append(MenuItem(f'[Bluetooth] {device.name}: {p}', None, enabled=False))
             items.append(Menu.SEPARATOR)
         else:
             items.append(MenuItem(self._t('tray.menu.no_device'), None, enabled=False))

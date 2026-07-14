@@ -28,6 +28,13 @@ from mouse_battery_core.keyboard_hid import (
     enumerate_keyboard_candidates,
     read_keyboard_battery,
 )
+from mouse_battery_core.bluetooth_gatt import (
+    BluetoothCandidate,
+    BluetoothInfo,
+    enumerate_bluetooth_candidates as _enumerate_bluetooth_candidates,
+    probe_bluetooth_candidate as _probe_bluetooth_candidate,
+    read_bluetooth_batteries as _read_bluetooth_batteries,
+)
 
 
 # 公开壳只需要知道“这是哪个品牌的后端”，
@@ -130,4 +137,27 @@ def keyboard_binding_from_info(keyboard: KeyboardInfo) -> dict:
         "usage": keyboard.usage,
         "interface_number": keyboard.interface_number,
         "product_name": keyboard.product_name,
+    }
+
+
+def enumerate_bluetooth_candidates() -> list[BluetoothCandidate]:
+    """枚举 Windows 已配对 BLE 设备，包含未连接或休眠设备。"""
+    return _enumerate_bluetooth_candidates()
+
+
+def probe_bluetooth_candidate(candidate: BluetoothCandidate) -> BluetoothInfo:
+    """绑定前验证在线设备的标准 Battery Service。"""
+    return _probe_bluetooth_candidate(candidate)
+
+
+def read_bluetooth_batteries(bindings: list[dict]) -> list[BluetoothInfo]:
+    """批量刷新公开壳保存的 BLE 绑定。"""
+    return _read_bluetooth_batteries(bindings)
+
+
+def bluetooth_binding_from_candidate(candidate: BluetoothCandidate) -> dict:
+    """把 BLE 候选 DTO 转成公开壳可持久化的最小绑定。"""
+    return {
+        'device_id': candidate.device_id,
+        'name': candidate.name,
     }
