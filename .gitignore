@@ -28,7 +28,7 @@ Thumbs.db
 .private-requirements.example.txt
 .private-core-src/
 mouse-battery-core/
-keyboard/测试记录.md
+keyboard/
 *.log
 .ace-tool/
 .codestable/

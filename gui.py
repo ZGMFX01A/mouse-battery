@@ -1513,15 +1513,21 @@ class MouseBatteryApp:
                     self.card_list,
                     settings_card,
                     action_row,
-                    status_bar,
-                    author_info,
                 ],
                 spacing=10,
                 scroll=ft.ScrollMode.AUTO,
                 expand=True,
             ),
-            padding=ft.Padding.only(left=28, right=28, bottom=12),
+            padding=ft.Padding.only(left=28, right=28, bottom=10),
             expand=True,
+        )
+
+        footer = ft.Container(
+            content=ft.Column(
+                controls=[status_bar, author_info],
+                spacing=10,
+            ),
+            padding=ft.Padding.only(left=28, right=28, bottom=12),
         )
 
         page.add(
@@ -1529,6 +1535,7 @@ class MouseBatteryApp:
                 controls=[
                     header,
                     main_content,
+                    footer,
                 ],
                 expand=True,
                 spacing=0,
