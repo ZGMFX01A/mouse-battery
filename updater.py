@@ -17,6 +17,7 @@ import time
 import urllib.request
 import urllib.error
 from urllib.error import URLError, HTTPError
+from urllib.parse import unquote, urlparse
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -310,7 +311,7 @@ def consume_shutdown_request(current_pid: int) -> Optional[dict]:
     return payload
 
 
-def _build_swap_script_lines(exe_path: str, old_exe_path: str,
+def _build_swap_script_lines(exe_path: str, target_exe_path: str, old_exe_path: str,
                              new_exe_path: str, swap_script_path: str,
                              target_pid: int,
                              expected_size: int) -> list[str]:
@@ -323,6 +324,12 @@ def _build_swap_script_lines(exe_path: str, old_exe_path: str,
     expected_size 用于在替换前校验新 exe 字节数，拦截截断下载导致
     PyInstaller onefile 解压后找不到 python312.dll 的情况。
     """
+    target_conflict_check = (
+        [f'if exist "{target_exe_path}" goto abort']
+        if os.path.normcase(os.path.abspath(target_exe_path))
+        != os.path.normcase(os.path.abspath(exe_path))
+        else []
+    )
     return [
         "@echo off",
         "setlocal enabledelayedexpansion",
@@ -337,7 +344,7 @@ def _build_swap_script_lines(exe_path: str, old_exe_path: str,
         ":force_kill",
         "set KILL_RETRY=0",
         ":kill_retry",
-        "if %KILL_RETRY% GEQ 20 goto fail",
+        "if %KILL_RETRY% GEQ 20 goto abort",
         f'taskkill /F /T /PID {target_pid} >nul 2>nul',
         f'tasklist /FI "PID eq {target_pid}" 2>nul | find /I "{target_pid}" >nul',
         "if errorlevel 1 goto swap",
@@ -356,30 +363,47 @@ def _build_swap_script_lines(exe_path: str, old_exe_path: str,
         f'for %%I in ("{new_exe_path}") do set NEW_SIZE=%%~zI',
         f'if not defined NEW_SIZE goto verify_fail',
         f'if !NEW_SIZE! NEQ {expected_size} goto verify_fail',
-        "set SWAP_RETRY=0",
-        ":swap_retry",
-        "if %SWAP_RETRY% GEQ 20 goto fail",
+        *target_conflict_check,
         f'if exist "{old_exe_path}" del /f /q "{old_exe_path}" >nul 2>nul',
-        f'if exist "{exe_path}" move /y "{exe_path}" "{old_exe_path}" >nul 2>nul',
-        f'move /y "{new_exe_path}" "{exe_path}" >nul 2>nul',
-        f'if exist "{exe_path}" goto run',
+        f'if exist "{old_exe_path}" goto abort',
+        f'if not exist "{exe_path}" goto abort',
+        f'move /y "{exe_path}" "{old_exe_path}" >nul 2>nul',
+        "if errorlevel 1 goto rollback",
+        f'if not exist "{old_exe_path}" goto rollback',
+        "set SWAP_RETRY=0",
+        ":install_retry",
+        "if %SWAP_RETRY% GEQ 20 goto rollback",
+        f'move /y "{new_exe_path}" "{target_exe_path}" >nul 2>nul',
+        "if errorlevel 1 goto install_wait",
+        f'if exist "{new_exe_path}" goto install_wait',
+        f'if not exist "{target_exe_path}" goto install_wait',
+        "goto run",
+        ":install_wait",
         "set /a SWAP_RETRY=%SWAP_RETRY%+1",
         "ping 127.0.0.1 -n 2 >nul",
-        "goto swap_retry",
+        "goto install_retry",
         ":run",
         # 新 exe 不能继承旧 onefile 进程的 _MEI 运行环境，否则它会继续占用
         # 即将清理的临时目录，导致 PyInstaller 弹出清理失败警告。
         "set PYINSTALLER_RESET_ENVIRONMENT=1",
-        f'start "" "{exe_path}"',
+        f'start "" "{target_exe_path}"',
         f'del /f /q "{swap_script_path}" >nul 2>nul',
         "exit /b 0",
         # 校验失败：不替换，清掉坏文件并退出，保留旧 exe 可继续运行。
         ":verify_fail",
+        "goto abort",
+        ":abort",
         f'del /f /q "{new_exe_path}" >nul 2>nul',
+        "set PYINSTALLER_RESET_ENVIRONMENT=1",
+        f'if exist "{exe_path}" start "" "{exe_path}"',
         f'del /f /q "{swap_script_path}" >nul 2>nul',
         "exit /b 2",
-        ":fail",
+        ":rollback",
+        f'if exist "{target_exe_path}" del /f /q "{target_exe_path}" >nul 2>nul',
+        f'if exist "{old_exe_path}" move /y "{old_exe_path}" "{exe_path}" >nul 2>nul',
         f'del /f /q "{new_exe_path}" >nul 2>nul',
+        "set PYINSTALLER_RESET_ENVIRONMENT=1",
+        f'if exist "{exe_path}" start "" "{exe_path}"',
         f'del /f /q "{swap_script_path}" >nul 2>nul',
         "exit /b 1",
     ]
@@ -399,15 +423,34 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
 
     current_pid = os.getpid()
     exe_path = sys.executable
-    old_exe_path = exe_path + ".old"
-    new_exe_path = exe_path + ".new"
+    asset_name = unquote(urlparse(download_url).path.rsplit('/', 1)[-1])
+    reserved_name = asset_name.split('.', 1)[0].upper()
+    reserved_names = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}
+    if (
+        not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.exe', asset_name, re.IGNORECASE)
+        or reserved_name in reserved_names
+    ):
+        logger.error(f"应用更新失败: Release 资源文件名非法: {asset_name!r}")
+        _notify_status(on_status, 'error', 'invalid_asset_name')
+        return False
+    target_exe_path = os.path.join(os.path.dirname(exe_path), asset_name)
+    if (
+        os.path.normcase(os.path.abspath(target_exe_path))
+        != os.path.normcase(os.path.abspath(exe_path))
+        and os.path.exists(target_exe_path)
+    ):
+        logger.error(f"应用更新失败: 目标版本文件已存在: {target_exe_path}")
+        _notify_status(on_status, 'error', 'target_exists')
+        return False
+    old_exe_path = target_exe_path + ".old"
+    new_exe_path = target_exe_path + ".new"
     swap_script_path = os.path.join(
         tempfile.gettempdir(),
         f"mouse_battery_swap_{current_pid}.cmd"
     )
     # 优先由外部传入宿主主进程 PID（GUI 热更新场景），否则用自身 PID
     target_pid = host_pid if isinstance(host_pid, int) and host_pid > 0 else current_pid
-    skip_gui_pid = current_pid if target_pid != current_pid else None
+    skip_gui_pid = os.getppid() if target_pid != current_pid else None
 
     try:
         # 1. 官方直链优先；只有 GitHub 提供了 SHA-256 时才允许经第三方镜像下载。
@@ -466,6 +509,7 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
         #    路径全部加引号，避免含空格/中文路径出错；编码使用本地 OEM 兼容
         script_lines = _build_swap_script_lines(
             exe_path=exe_path,
+            target_exe_path=target_exe_path,
             old_exe_path=old_exe_path,
             new_exe_path=new_exe_path,
             swap_script_path=swap_script_path,
