@@ -1,5 +1,5 @@
 hidapi>=0.14
 Pillow>=10.0
 pystray>=0.19
-flet>=0.80
-flet-desktop>=0.80
+flet==0.81.0
+flet-desktop==0.81.0
