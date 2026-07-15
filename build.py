@@ -270,9 +270,28 @@ def build():
     try:
         import flet_desktop
         flet_desktop_dir = os.path.dirname(flet_desktop.__file__)
+        flet_runtime_dir = os.path.join(flet_desktop_dir, 'app', 'flet')
+        required_runtime_files = (
+            'flet.exe',
+            'flutter_windows.dll',
+            os.path.join('data', 'app.so'),
+            os.path.join('data', 'icudtl.dat'),
+        )
+        missing_runtime_files = [
+            path for path in required_runtime_files
+            if not os.path.isfile(os.path.join(flet_runtime_dir, path))
+        ]
+        if missing_runtime_files:
+            print(
+                "[ERROR] flet-desktop is missing required Windows desktop runtime files: "
+                f"{', '.join(missing_runtime_files)}"
+            )
+            print("[ERROR] Reinstall dependencies in the project virtual environment before building.")
+            return 1
         cmd.extend(['--add-data', f'{flet_desktop_dir};flet_desktop'])
     except ImportError:
-        print("Warning: flet_desktop not found, skipping. (GUI may not run later)")
+        print("[ERROR] flet-desktop is required to build the GUI executable.")
+        return 1
 
     # 隐式导入和其他启动文件
     cmd.extend([

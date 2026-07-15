@@ -208,6 +208,13 @@ def launch_gui_mode():
     # 确定资源基准目录（打包后用 _MEIPASS，源码用文件所在目录）
     if getattr(sys, 'frozen', False):
         base_dir = sys._MEIPASS
+v        flet_view_path = os.path.join(base_dir, 'flet_desktop', 'app', 'flet')
+        flet_executable = os.path.join(flet_view_path, 'flet.exe')
+        if not os.path.isfile(flet_executable):
+            raise FileNotFoundError(f"打包产物缺少 Flet 桌面运行时: {flet_executable}")
+        os.environ['FLET_VIEW_PATH'] = flet_view_path
+        # Flet 优先扫描当前目录的 build/windows；固定到解压目录，避免误用外部 exe。
+        os.chdir(base_dir)
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
 
