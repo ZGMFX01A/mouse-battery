@@ -32,6 +32,18 @@ class _InterruptedResponse(_Response):
         return super().read1(2)
 
 
+class _ExactSizeWithoutEofResponse(_Response):
+    def __init__(self, value):
+        super().__init__(value)
+        self._reads = 0
+
+    def read1(self, size=-1):
+        self._reads += 1
+        if self._reads > 1:
+            raise TimeoutError('server did not close the response')
+        return super().read1(size)
+
+
 class UpdaterTests(unittest.TestCase):
     def test_check_for_update_returns_asset_verification_metadata(self):
         payload = json.dumps({
@@ -198,6 +210,34 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(retries, [(1, 1)])
             with open(target, 'rb') as downloaded:
                 self.assertEqual(downloaded.read(), content)
+
+    def test_download_stops_at_expected_size_without_waiting_for_eof(self):
+        content = b'MZ-update-content'
+        response = _ExactSizeWithoutEofResponse(content)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = os.path.join(temp_dir, 'update.new')
+            with mock.patch.object(updater, '_urlopen', return_value=response):
+                size, digest = updater._download_to_path(
+                    'https://example.test/app.exe',
+                    target,
+                    expected_size=len(content),
+                )
+
+        self.assertEqual(response._reads, 1)
+        self.assertEqual((size, digest), (len(content), hashlib.sha256(content).hexdigest()))
+
+    def test_swap_script_resets_pyinstaller_environment_before_restart(self):
+        lines = updater._build_swap_script_lines(
+            exe_path=r'C:\App\MouseBattery.exe',
+            old_exe_path=r'C:\App\MouseBattery.exe.old',
+            new_exe_path=r'C:\App\MouseBattery.exe.new',
+            swap_script_path=r'C:\Temp\swap.cmd',
+            target_pid=123,
+            expected_size=456,
+        )
+
+        reset_index = lines.index('set PYINSTALLER_RESET_ENVIRONMENT=1')
+        self.assertEqual(lines[reset_index + 1], 'start "" "C:\\App\\MouseBattery.exe"')
 
 if __name__ == '__main__':
     unittest.main()

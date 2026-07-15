@@ -1495,6 +1495,10 @@ class MouseBatteryApp:
                     success = False
                 finally:
                     if success:
+                        # 正常关闭 Flet 桌面运行时，确保其子进程先释放 PyInstaller
+                        # onefile 的共享 _MEI 目录；不要在下载线程里用 os._exit() 硬退。
+                        if self.page:
+                            await self.page.window.close()
                         return
                     dialog.actions[1].disabled = False
                     self._safe_update()

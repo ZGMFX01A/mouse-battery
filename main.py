@@ -184,9 +184,15 @@ def cleanup_settings_windows():
             try:
                 if _shutdown_for_update and _shutdown_skip_gui_pid == p.pid:
                     logging.getLogger(__name__).info(
-                        f"热更新退出时跳过强杀 GUI 子进程: pid={p.pid}"
+                        f"热更新退出时等待 GUI 正常释放运行时: pid={p.pid}"
                     )
-                    continue
+                    try:
+                        p.wait(timeout=15)
+                        continue
+                    except subprocess.TimeoutExpired:
+                        logging.getLogger(__name__).warning(
+                            f"GUI 热更新收尾超时，将强制关闭: pid={p.pid}"
+                        )
                 if os.name == 'nt':
                     subprocess.call(['taskkill', '/F', '/T', '/PID', str(p.pid)],
                                     creationflags=subprocess.CREATE_NO_WINDOW)

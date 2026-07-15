@@ -182,9 +182,17 @@ def _download_to_path(url: str, target_path: str, on_progress=None,
                         f.write(chunk)
                         hasher.update(chunk)
                         downloaded += len(chunk)
+                        if expected_size > 0 and downloaded > expected_size:
+                            raise RuntimeError(
+                                f"下载字节数超过预期: expected={expected_size}, actual={downloaded}"
+                            )
                         if on_progress:
                             pct = int(downloaded / total_size * 100) if total_size > 0 else -1
                             on_progress(min(pct, 100), downloaded, total_size)
+                        # 某些下载代理传完 Content-Length 后不及时关闭响应；继续等 EOF
+                        # 会让已完整的下载长期停在 99%。达到可信大小即可进入哈希校验。
+                        if expected_size > 0 and downloaded == expected_size:
+                            break
 
             return downloaded, hasher.hexdigest()
         except Exception as e:
@@ -359,6 +367,9 @@ def _build_swap_script_lines(exe_path: str, old_exe_path: str,
         "ping 127.0.0.1 -n 2 >nul",
         "goto swap_retry",
         ":run",
+        # 新 exe 不能继承旧 onefile 进程的 _MEI 运行环境，否则它会继续占用
+        # 即将清理的临时目录，导致 PyInstaller 弹出清理失败警告。
+        "set PYINSTALLER_RESET_ENVIRONMENT=1",
         f'start "" "{exe_path}"',
         f'del /f /q "{swap_script_path}" >nul 2>nul',
         "exit /b 0",
@@ -481,14 +492,6 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
             )
         else:
             logger.warning("退出请求写入失败，将依赖外部脚本超时后强制结束目标进程")
-
-        # GUI 作为子进程发起更新时，应立即退出自身释放文件占用；
-        # 宿主主进程则由 watchdog 接管优雅退出，避免下载线程被过早中断。
-        if target_pid != current_pid:
-            import atexit
-            logger.info(f"GUI 更新进程准备退出，交由主进程完成热更新收尾: host_pid={target_pid}")
-            atexit._run_exitfuncs()
-            os._exit(0)
 
         return True
 
