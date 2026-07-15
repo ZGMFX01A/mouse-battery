@@ -63,16 +63,16 @@ def resolve_ui_language(preference: str | None) -> str:
 
 _TRANSLATIONS = {
     'app.window_title': {
-        LANGUAGE_ZH_CN: '鼠标电量监控',
-        LANGUAGE_EN_US: 'Mouse Battery Monitor',
+        LANGUAGE_ZH_CN: '无线设备电量监控',
+        LANGUAGE_EN_US: 'Wireless Device Battery Monitor',
     },
     'app.header_title': {
-        LANGUAGE_ZH_CN: '鼠标电量监控',
-        LANGUAGE_EN_US: 'Mouse Battery Monitor',
+        LANGUAGE_ZH_CN: '无线设备电量监控',
+        LANGUAGE_EN_US: 'Wireless Device Battery Monitor',
     },
     'app.header_subtitle': {
-        LANGUAGE_ZH_CN: '实时查看无线鼠标电量',
-        LANGUAGE_EN_US: 'Live battery status for wireless devices',
+        LANGUAGE_ZH_CN: '实时查看鼠标、键盘与蓝牙设备电量',
+        LANGUAGE_EN_US: 'Live battery status for mice, keyboards, and Bluetooth devices',
     },
     'settings.title': {
         LANGUAGE_ZH_CN: '设置',
@@ -107,8 +107,8 @@ _TRANSLATIONS = {
         LANGUAGE_EN_US: 'Tray Icon Priority',
     },
     'settings.tray_priority.subtitle': {
-        LANGUAGE_ZH_CN: '控制鼠标与键盘同时存在时托盘图标优先显示哪台设备',
-        LANGUAGE_EN_US: 'Choose which device the tray icon should prefer when mouse and keyboard are both present',
+        LANGUAGE_ZH_CN: '控制多台设备同时存在时托盘图标优先显示哪台设备',
+        LANGUAGE_EN_US: 'Choose which device the tray icon should prefer when multiple devices are present',
     },
     'settings.tray_priority.mouse_first': {
         LANGUAGE_ZH_CN: '优先鼠标',
@@ -587,8 +587,8 @@ _TRANSLATIONS = {
         LANGUAGE_EN_US: 'Later',
     },
     'tray.app_name': {
-        LANGUAGE_ZH_CN: '鼠标电量监控',
-        LANGUAGE_EN_US: 'Mouse Battery Monitor',
+        LANGUAGE_ZH_CN: '无线设备电量监控',
+        LANGUAGE_EN_US: 'Wireless Device Battery Monitor',
     },
     'tray.scanning': {
         LANGUAGE_ZH_CN: '正在扫描...',

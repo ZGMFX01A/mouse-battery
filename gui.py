@@ -1,5 +1,5 @@
 """
-鼠标电量监控 - GUI 界面 (Flet 0.80+)
+无线设备电量监控 - GUI 界面 (Flet 0.80+)
 
 浅色极简科技感界面：
 - 轻量 Windows 工具定位，不做电竞驱动风格
@@ -12,6 +12,7 @@ import os
 import time
 import threading
 import logging
+import webbrowser
 from typing import Optional
 
 import flet as ft
@@ -88,11 +89,15 @@ COLORS = {
     # —— 品牌标识色 ——
     'logitech_blue': '#2563EB',
     'razer_green': '#16A34A',
+
+    # 作者信息高亮色：用于底部署名，提升浅色背景中的可见性。
+    'author_glow_blue': '#38BDF8',
 }
 
 
 # 右侧控件列宽统一常量：右侧只放轻量控件，不再放宽大的下拉框。
 TRAILING_WIDTH = 104
+PROJECT_HOME_URL = 'https://github.com/ZGMFX01A/mouse-battery/'
 
 
 def _alpha(hex_color: str, alpha_hex: str) -> str:
@@ -638,7 +643,7 @@ def build_empty_state(title: str = '未发现鼠标设备',
 
 
 class MouseBatteryApp:
-    """鼠标电量监控主应用。"""
+    """无线设备电量监控主应用。"""
 
     # 低电量提醒允许的档位：关闭(0)、10%、20%、30%。
     # -/+ 步进与 _set_notify_threshold 校验共用此常量，避免多处硬编码不一致。
@@ -675,6 +680,7 @@ class MouseBatteryApp:
         self._bluetooth_bind_action: Optional[ft.TextButton] = None
         self._bluetooth_selected_device_id = ''
         self._bluetooth_dialog_loading = False
+        self._bluetooth_pending_request_id = 0
         # 动作按钮忙碌标记：Container.disabled 在 Flet 中无法拦截 on_click，
         # 这里用显式锁替代，避免扫描/刷新/检查更新在执行中被重复点击触发并发。
         self._scan_busy = False
@@ -742,6 +748,7 @@ class MouseBatteryApp:
         self._bluetooth_bind_action = None
         self._bluetooth_selected_device_id = ''
         self._bluetooth_dialog_loading = False
+        self._bluetooth_pending_request_id = 0
         self._last_render_signature = None
         self.build(self.page, initial_scan=False, auto_refresh_enabled=auto_refresh_enabled)
 
@@ -1147,6 +1154,7 @@ class MouseBatteryApp:
             self._bluetooth_dialog.open = False
         self._bluetooth_bind_action = None
         self._bluetooth_dialog_loading = False
+        self._bluetooth_pending_request_id = 0
         self._safe_update()
 
     def _build_bluetooth_dialog_content(self):
@@ -1157,7 +1165,7 @@ class MouseBatteryApp:
         if not self._bluetooth_selected_device_id and available:
             self._bluetooth_selected_device_id = available[0].device_id
 
-        if self._bluetooth_dialog_loading or scan_state == 'loading':
+        if self._bluetooth_dialog_loading or scan_state in ('loading', 'binding'):
             return ft.Column(
                 controls=[
                     ft.ProgressRing(width=26, height=26, color=COLORS['accent_green']),
@@ -1211,11 +1219,21 @@ class MouseBatteryApp:
         if not self._bluetooth_dialog or not self._bluetooth_dialog.open:
             return
         scan_state, _ = self._bluetooth_scan_state()
-        if scan_state == 'bound':
+        response_request_id = int(getattr(self.device_manager, 'bluetooth_request_id', 0) or 0)
+        response_matches = (
+            self._bluetooth_pending_request_id > 0
+            and response_request_id == self._bluetooth_pending_request_id
+        )
+        if scan_state == 'bound' and (response_matches or not self._bluetooth_pending_request_id):
             self._close_bluetooth_dialog()
             return
-        if scan_state != 'loading':
+        if self._bluetooth_pending_request_id and not response_matches:
+            self._bluetooth_dialog_loading = True
+        elif scan_state in ('loading', 'binding'):
+            self._bluetooth_dialog_loading = True
+        else:
             self._bluetooth_dialog_loading = False
+            self._bluetooth_pending_request_id = 0
         self._bluetooth_dialog.content = self._build_bluetooth_dialog_content()
         if self._bluetooth_bind_action:
             available_ids = {
@@ -1224,7 +1242,9 @@ class MouseBatteryApp:
                 item.device_id for item in self._bluetooth_devices_snapshot()
             }
             self._bluetooth_bind_action.disabled = (
-                scan_state == 'loading' or self._bluetooth_selected_device_id not in available_ids
+                self._bluetooth_dialog_loading
+                or scan_state in ('loading', 'binding')
+                or self._bluetooth_selected_device_id not in available_ids
             )
 
     def _on_bind_bluetooth_click(self, e):
@@ -1233,13 +1253,18 @@ class MouseBatteryApp:
             self._show_dialog(self._t('bluetooth.select_required.title'), self._t('bluetooth.select_required.message'))
             return
         try:
-            request_device_command(DEVICE_COMMAND_BIND_BLUETOOTH, {'device_id': device_id})
+            self._bluetooth_pending_request_id = request_device_command(
+                DEVICE_COMMAND_BIND_BLUETOOTH, {'device_id': device_id},
+            )
         except Exception as exc:
             logger.error('提交蓝牙绑定命令失败: %s', exc)
             self._show_dialog(self._t('bluetooth.bind.failed.title'), self._t('bluetooth.bind.failed.message', error=exc))
             return
         self._bluetooth_dialog_loading = True
-        self._refresh_bluetooth_dialog()
+        if self._bluetooth_dialog:
+            self._bluetooth_dialog.content = self._build_bluetooth_dialog_content()
+        if self._bluetooth_bind_action:
+            self._bluetooth_bind_action.disabled = True
         self._safe_update()
 
     def _open_bluetooth_picker_dialog(self):
@@ -1260,7 +1285,9 @@ class MouseBatteryApp:
         self._bluetooth_dialog_loading = True
         self._bluetooth_selected_device_id = ''
         try:
-            request_device_command(DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES)
+            self._bluetooth_pending_request_id = request_device_command(
+                DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES,
+            )
         except Exception as exc:
             self._bluetooth_dialog_loading = False
             logger.error('提交蓝牙扫描命令失败: %s', exc)
@@ -1794,11 +1821,14 @@ class MouseBatteryApp:
             content=ft.Text(
                 'Made by ZGMFX01A',
                 size=11,
-                color=COLORS['text_dim'],
+                # 使用偏亮的科技蓝高亮作者信息，避免在浅色背景里被弱化。
+                color=COLORS['author_glow_blue'],
                 text_align=ft.TextAlign.CENTER,
             ),
             alignment=ft.Alignment.CENTER,
             padding=ft.Padding.only(top=2),
+            tooltip=PROJECT_HOME_URL,
+            on_click=lambda _: webbrowser.open(PROJECT_HOME_URL),
         )
 
         main_content = ft.Container(

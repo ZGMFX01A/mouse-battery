@@ -1,6 +1,8 @@
 import json
 import os
+import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -52,6 +54,54 @@ class BluetoothSharedStateTests(unittest.TestCase):
         candidate = BluetoothCandidate('device-1', 'BLE Mouse', connected=True)
         restored = devices._deserialize_bluetooth_candidate(devices._serialize_bluetooth_candidate(candidate))
         self.assertTrue(restored.connected)
+
+    def test_bind_publishes_binding_state_before_hardware_probe(self):
+        manager = devices.DeviceManager.__new__(devices.DeviceManager)
+        manager._lock = threading.Lock()
+        manager._io_lock = threading.Lock()
+        manager._bluetooth_candidates = [BluetoothCandidate('device-1', 'BLE Mouse', connected=True)]
+        manager._bluetooth_devices = []
+        manager._bluetooth_scan_state = 'ready'
+        manager._bluetooth_scan_message = ''
+        manager.config_manager = mock.Mock()
+        manager.config_manager.bluetooth_bindings = []
+        manager._notify_update = mock.Mock()
+
+        def probe(candidate):
+            self.assertEqual(manager.bluetooth_scan_state, 'binding')
+            self.assertIn(candidate.name, manager.bluetooth_scan_message)
+            return BluetoothInfo(candidate.device_id, candidate.name, percentage=55, online=True)
+
+        with mock.patch.object(devices, 'probe_bluetooth_candidate', side_effect=probe):
+            manager._bind_bluetooth('device-1', request_id=123)
+
+        self.assertEqual(manager.bluetooth_scan_state, 'bound')
+        self.assertEqual(manager._bluetooth_request_id, 123)
+        self.assertEqual(manager._notify_update.call_count, 2)
+
+    def test_gui_keeps_loading_until_matching_tray_response(self):
+        with mock.patch.dict(sys.modules, {'flet': mock.Mock()}):
+            import gui
+
+        app = gui.MouseBatteryApp.__new__(gui.MouseBatteryApp)
+        app._bluetooth_dialog = mock.Mock(open=True)
+        app._bluetooth_bind_action = mock.Mock()
+        app._bluetooth_dialog_loading = True
+        app._bluetooth_pending_request_id = 200
+        app._bluetooth_selected_device_id = 'device-1'
+        app.device_manager = mock.Mock(bluetooth_request_id=100)
+        app._bluetooth_scan_state = mock.Mock(return_value=('ready', '旧扫描结果'))
+        app._bluetooth_candidates_snapshot = mock.Mock(return_value=[
+            BluetoothCandidate('device-1', 'BLE Mouse', connected=True),
+        ])
+        app._bluetooth_devices_snapshot = mock.Mock(return_value=[])
+        app._build_bluetooth_dialog_content = mock.Mock(return_value=mock.Mock())
+
+        app._refresh_bluetooth_dialog()
+
+        self.assertTrue(app._bluetooth_dialog_loading)
+        self.assertEqual(app._bluetooth_pending_request_id, 200)
+        self.assertTrue(app._bluetooth_bind_action.disabled)
 
 
 class BluetoothTrayTests(unittest.TestCase):

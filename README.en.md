@@ -1,8 +1,8 @@
-# 🖱️ Mouse Battery Monitor
+# 🔋 Wireless Device Battery Monitor
 
 English | [简体中文](README.md)
 
-A lightweight Windows tray utility for monitoring battery status of Logitech and Razer wireless mice, with quick access to refresh actions, settings, and low-battery alerts.
+A lightweight Windows tray utility for monitoring battery status across wireless mice, mechanical keyboards, and standard BLE devices, with quick access to refresh actions, settings, and low-battery alerts.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6)
@@ -23,7 +23,7 @@ A lightweight Windows tray utility for monitoring battery status of Logitech and
 - **Bilingual UI**: Supports switching between Chinese and English in the settings window.
 - **Auto update**: Supports update checking and automatic update flow.
 
-## 🖱️ Supported Devices
+## 🔌 Supported Devices
 
 ### Bluetooth LE
 
@@ -58,9 +58,9 @@ Supports paired devices that expose the standard BLE Battery Service (GATT `0x18
 
 ## 🚀 Quick Start
 
-1. Download the latest `MouseBattery.exe` from [Releases](../../releases).
+1. Download the latest `WirelessDeviceBatteryMonitor-<version>.exe` from [Releases](../../releases).
 2. Launch the program and look for its icon in the Windows system tray.
-3. Connect your mouse through a 2.4G wireless receiver.
+3. Connect a supported 2.4G wireless mouse, mechanical keyboard, or paired standard BLE battery device.
 4. If the device is not detected, close vendor software that may occupy the HID interface. If needed, run the app as administrator.
 
 ## 📖 How to Use

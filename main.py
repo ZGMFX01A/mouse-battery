@@ -1,8 +1,7 @@
 """
-鼠标电量监控 - 程序入口
+无线设备电量监控 - 程序入口
 
-检测罗技和雷蛇无线鼠标的电池状态，在系统托盘显示电量。
-支持: 罗技 G903, G502X / 雷蛇 巴塞利斯蛇 V3 Pro 等
+检测无线鼠标、机械键盘与标准 BLE 设备的电池状态，并在系统托盘显示电量。
 """
 
 import sys
@@ -248,7 +247,7 @@ def launch_gui_mode():
             time.sleep(0.5)
 
     def _flet_main(page: ft.Page):
-        page.title = "鼠标电量监控"
+        page.title = "无线设备电量监控"
         # 后台线程设置窗口图标
         threading.Thread(target=_set_window_icon, args=(page.title,), daemon=True).start()
 
@@ -289,7 +288,7 @@ if __name__ == '__main__':
         sys.exit(0)
 
     logger.info("=" * 50)
-    logger.info("鼠标电量监控程序启动")
+    logger.info("无线设备电量监控程序启动")
     logger.info("=" * 50)
 
     if not check_admin():

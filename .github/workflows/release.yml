@@ -112,7 +112,7 @@ jobs:
 
       - name: Smoke test frozen executable
         run: |
-          & "./dist/MouseBattery.exe" --smoke-test
+          & "./dist/WirelessDeviceBatteryMonitor.exe" --smoke-test
 
       - name: Rename executable
         id: rename
@@ -123,8 +123,8 @@ jobs:
           } else {
             $VERSION = "latest"
           }
-          $NEW_NAME = "MouseBattery-$VERSION.exe"
-          Rename-Item -Path "dist/MouseBattery.exe" -NewName $NEW_NAME
+          $NEW_NAME = "WirelessDeviceBatteryMonitor-$VERSION.exe"
+          Rename-Item -Path "dist/WirelessDeviceBatteryMonitor.exe" -NewName $NEW_NAME
           echo "EXE_NAME=$NEW_NAME" >> $env:GITHUB_OUTPUT
           echo "VERSION=$VERSION" >> $env:GITHUB_OUTPUT
 

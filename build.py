@@ -251,7 +251,7 @@ def build():
         sys.executable, '-m', 'PyInstaller',
         '--onefile',
         '--noconsole',
-        '--name', 'MouseBattery',
+        '--name', 'WirelessDeviceBatteryMonitor',
         # --clean：打包前清理 PyInstaller 缓存，避免旧构建残留混入新 exe，
         # 否则旧缓存可能导致 onefile 解压后模块不全（python312.dll 加载失败的诱因之一）。
         '--clean',
@@ -326,7 +326,7 @@ def build():
     print(f"Run: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=os.path.dirname(__file__) or '.')
     if result.returncode == 0:
-        print("\n[SUCCESS] Build complete! Output: dist/MouseBattery.exe")
+        print("\n[SUCCESS] Build complete! Output: dist/WirelessDeviceBatteryMonitor.exe")
     else:
         print(f"\n[ERROR] Build failed, return code: {result.returncode}")
     return result.returncode

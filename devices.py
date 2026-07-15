@@ -95,8 +95,9 @@ def request_device_command(action: str, payload: Optional[dict] = None):
     """
     command_file = get_device_command_path()
     temp_file = f'{command_file}.{os.getpid()}.tmp'
+    request_id = time.time_ns()
     data = {
-        'request_id': time.time_ns(),
+        'request_id': request_id,
         'action': action,
         'payload': payload or {},
         'requested_at': time.time(),
@@ -106,6 +107,7 @@ def request_device_command(action: str, payload: Optional[dict] = None):
         f.flush()
         os.fsync(f.fileno())
     os.replace(temp_file, command_file)
+    return request_id
 
 
 class DeviceManager:
@@ -130,6 +132,7 @@ class DeviceManager:
         self._bluetooth_candidates: list[BluetoothCandidate] = []
         self._bluetooth_scan_state = 'idle'
         self._bluetooth_scan_message = ''
+        self._bluetooth_request_id = 0
         # _mice[i] 对应的桥接后端句柄：
         # 刷新时通过遍历该映射读电，避免 idx 错位
         self._mouse_to_device: list[tuple[Brand, MouseBackendHandle]] = []
@@ -243,6 +246,7 @@ class DeviceManager:
                     'bluetooth_candidates': [_serialize_bluetooth_candidate(item) for item in self._bluetooth_candidates],
                     'bluetooth_scan_state': self._bluetooth_scan_state,
                     'bluetooth_scan_message': self._bluetooth_scan_message,
+                    'bluetooth_request_id': self._bluetooth_request_id,
                 }
 
             # 先写临时文件再替换正式文件，避免 GUI 在读取时遇到半截 JSON。
@@ -340,10 +344,11 @@ class DeviceManager:
         with self._lock:
             self._bluetooth_devices = snapshots
 
-    def _scan_bluetooth_candidates(self):
+    def _scan_bluetooth_candidates(self, request_id: int = 0):
         with self._lock:
             self._bluetooth_scan_state = 'loading'
             self._bluetooth_scan_message = '正在读取 Windows 已配对蓝牙设备...'
+            self._bluetooth_request_id = request_id
         self._notify_update()
         try:
             with self._io_lock:
@@ -366,7 +371,7 @@ class DeviceManager:
             )
         self._notify_update()
 
-    def _bind_bluetooth(self, device_id: str):
+    def _bind_bluetooth(self, device_id: str, request_id: int = 0):
         candidates = self.bluetooth_candidates or enumerate_bluetooth_candidates()
         target = next((item for item in candidates if item.device_id == device_id), None)
         if target is None:
@@ -374,6 +379,11 @@ class DeviceManager:
         if any(item['device_id'] == device_id for item in self.config_manager.bluetooth_bindings):
             raise ValueError('该蓝牙设备已经添加。')
 
+        with self._lock:
+            self._bluetooth_scan_state = 'binding'
+            self._bluetooth_scan_message = f'正在读取蓝牙设备电量：{target.name}'
+            self._bluetooth_request_id = request_id
+        self._notify_update()
         with self._io_lock:
             snapshot = probe_bluetooth_candidate(target)
         self.config_manager.add_bluetooth_binding(bluetooth_binding_from_candidate(target))
@@ -471,6 +481,7 @@ class DeviceManager:
             pass
 
         action = str(command.get('action', '') or '')
+        request_id = int(command.get('request_id', 0) or 0)
         payload = command.get('payload') if isinstance(command.get('payload'), dict) else {}
         if action == DEVICE_COMMAND_SCAN_KEYBOARD_CANDIDATES:
             self._scan_keyboard_candidates()
@@ -484,18 +495,19 @@ class DeviceManager:
             self._unbind_keyboard()
             return
         if action == DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES:
-            self._scan_bluetooth_candidates()
+            self._scan_bluetooth_candidates(request_id)
             return
         if action == DEVICE_COMMAND_BIND_BLUETOOTH:
             device_id = str(payload.get('device_id', '') or '').strip()
             if device_id:
                 try:
-                    self._bind_bluetooth(device_id)
+                    self._bind_bluetooth(device_id, request_id)
                 except Exception as exc:
                     logger.error('绑定蓝牙设备失败: %s', exc)
                     with self._lock:
                         self._bluetooth_scan_state = 'error'
                         self._bluetooth_scan_message = f'绑定失败：{exc}'
+                        self._bluetooth_request_id = request_id
                     self._notify_update()
             return
         if action == DEVICE_COMMAND_UNBIND_BLUETOOTH:
@@ -1079,6 +1091,7 @@ class SharedStateDeviceManager:
         self._bluetooth_candidates: list[BluetoothCandidate] = []
         self._bluetooth_scan_state = 'idle'
         self._bluetooth_scan_message = ''
+        self._bluetooth_request_id = 0
         self._lock = threading.Lock()
         self._on_update_callbacks: list[Callable] = []
         self._auto_refresh_running = False
@@ -1134,6 +1147,11 @@ class SharedStateDeviceManager:
     def bluetooth_scan_message(self) -> str:
         with self._lock:
             return self._bluetooth_scan_message
+
+    @property
+    def bluetooth_request_id(self) -> int:
+        with self._lock:
+            return self._bluetooth_request_id
 
     @property
     def last_read_state(self) -> str:
@@ -1199,6 +1217,7 @@ class SharedStateDeviceManager:
             bluetooth_candidates: list[BluetoothCandidate] = []
             bluetooth_scan_state = 'idle'
             bluetooth_scan_message = ''
+            bluetooth_request_id = 0
 
             # 兼容旧版共享状态：根节点为纯鼠标数组。
             if isinstance(data, list):
@@ -1228,6 +1247,7 @@ class SharedStateDeviceManager:
                 ]
                 bluetooth_scan_state = str(data.get('bluetooth_scan_state', 'idle') or 'idle')
                 bluetooth_scan_message = str(data.get('bluetooth_scan_message', '') or '')
+                bluetooth_request_id = int(data.get('bluetooth_request_id', 0) or 0)
             else:
                 raise ValueError(f"共享状态文件根节点类型不支持: {type(data).__name__}")
 
@@ -1246,6 +1266,7 @@ class SharedStateDeviceManager:
                 self._bluetooth_candidates = bluetooth_candidates
                 self._bluetooth_scan_state = bluetooth_scan_state
                 self._bluetooth_scan_message = bluetooth_scan_message
+                self._bluetooth_request_id = bluetooth_request_id
                 self._last_read_state = 'ok'
                 self._last_read_error = ''
         except Exception as e:
