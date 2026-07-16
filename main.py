@@ -164,6 +164,11 @@ def open_settings_window():
         # 因此通过传入 --gui 参数，再次启动本程序，但进入 GUI 逻辑
         env = os.environ.copy()
         env['MOUSE_BATTERY_HOST_PID'] = str(os.getpid())
+        # PyInstaller 6.9+ onefile：用同 exe 拉起子进程时默认复用父进程 _MEI 目录。
+        # 设置窗口是独立实例且可能长于托盘生命周期之外的交互，必须重置环境，
+        # 否则子进程会 Failed to import encodings module。
+        if getattr(sys, 'frozen', False):
+            env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
         p = subprocess.Popen(
             [sys.executable, '--gui'],
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
