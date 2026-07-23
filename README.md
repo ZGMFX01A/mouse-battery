@@ -45,6 +45,11 @@ Windows 托盘常驻工具，用于统一监控无线鼠标、机械键盘和标
 | G903 / G703 | Lightspeed | 🔧 理论支持 |
 | G502X | Lightspeed | 🔧 理论支持 |
 | G Pro Wireless | Lightspeed | 🔧 理论支持 |
+| 其他 Lightspeed 接收器（PID `C53A`、`C53D`、`C545`、`C54D`） | Lightspeed | 🔧 协议兼容候选 |
+| Unifying Receiver（PID `C52B`、`C532`） | 2.4G 接收器 | 🔧 协议兼容候选 |
+| Nano Receiver（PID `C518`、`C51A`、`C51B`、`C521`、`C525`、`C526`、`C52E`、`C52F`、`C531`、`C534`、`C535`、`C537`） | 2.4G 接收器 | 🔧 协议兼容候选 |
+
+> 罗技支持按接收器 PID 和 HID++ 电量能力识别，接收器后配对的具体鼠标型号取决于设备自身暴露的 HID++ feature。新增接收器尚未逐一完成真实硬件验证。
 
 ### 机械键盘
 

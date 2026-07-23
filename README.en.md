@@ -45,6 +45,11 @@ Supports paired devices that expose the standard BLE Battery Service (GATT `0x18
 | G903 / G703 | Lightspeed | 🔧 Theoretically supported |
 | G502X | Lightspeed | 🔧 Theoretically supported |
 | G Pro Wireless | Lightspeed | 🔧 Theoretically supported |
+| Other Lightspeed receivers (PIDs `C53A`, `C53D`, `C545`, `C54D`) | Lightspeed | 🔧 Protocol-compatible candidate |
+| Unifying Receiver (PIDs `C52B`, `C532`) | 2.4G receiver | 🔧 Protocol-compatible candidate |
+| Nano Receiver (PIDs `C518`, `C51A`, `C51B`, `C521`, `C525`, `C526`, `C52E`, `C52F`, `C531`, `C534`, `C535`, `C537`) | 2.4G receiver | 🔧 Protocol-compatible candidate |
+
+> Logitech support is identified by receiver PID and HID++ battery features. The exact mouse paired with a receiver depends on the HID++ features it exposes. Newly added receivers have not been individually verified on real hardware.
 
 ### Mechanical Keyboards
 
